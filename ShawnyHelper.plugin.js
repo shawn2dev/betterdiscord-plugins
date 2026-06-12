@@ -2,7 +2,7 @@
  * @name ShawnyHelper
  * @author Shawny
  * @description Reduces AFK voice channel moves caused by Discord idle/AFK handling and helpers for shawnybot.
- * @version 1.7.3
+ * @version 1.7.4
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/ShawnyHelper.plugin.js
  */
@@ -11,6 +11,9 @@
 
 const _UPDATE_URL =
   'https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/ShawnyHelper.plugin.js';
+const _UPDATE_URL_ALT =
+  'https://cdn.jsdelivr.net/gh/shawn2dev/betterdiscord-plugins@main/ShawnyHelper.plugin.js';
+const _AUTO_UPDATE_INTERVAL_MS = 1000 * 60 * 60;
 
 const _CLIENT_LOG = {
   enabled: true,
@@ -37,6 +40,7 @@ module.exports = class ShawnyHelper {
     this._audioResumeTimer = null;
     this.useAudioKeepalive = true;
     this._clientLogConfig = { ..._CLIENT_LOG };
+    this._autoUpdateInterval = null;
   }
 
   getName() {
@@ -694,6 +698,12 @@ module.exports = class ShawnyHelper {
   }
 
   _isRemoteVersionNewer(remoteVersion, currentVersion) {
+    try {
+      if (BdApi.Utils?.semverCompare) {
+        return BdApi.Utils.semverCompare(currentVersion, remoteVersion) === -1;
+      }
+    } catch (_) {}
+
     const remote = this._parseVersion(remoteVersion);
     const current = this._parseVersion(currentVersion);
     const length = Math.max(remote.length, current.length);
@@ -717,72 +727,59 @@ module.exports = class ShawnyHelper {
     return methodMatch ? methodMatch[1] : null;
   }
 
-  _confirmPluginUpdate(onConfirm) {
-    if (BdApi.UI?.showConfirmationModal) {
-      BdApi.UI.showConfirmationModal({
-        title: 'ShawnyHelper Update',
-        content: 'A newer version is available. Install it now?',
-        confirmText: 'Update',
-        cancelText: 'Later',
-        onConfirm,
-      });
-      return;
-    }
-
-    if (typeof BdApi.showConfirmationModal === 'function') {
-      BdApi.showConfirmationModal('ShawnyHelper Update', 'Install the latest version?', {
-        confirmText: 'Update',
-        cancelText: 'Later',
-        onConfirm,
-      });
-      return;
-    }
-
-    onConfirm();
-  }
-
   _applyPluginUpdate(content, version) {
-    const addon =
-      BdApi.Plugins.get('ShawnyHelper') ||
-      BdApi.Plugins.get('ShawnyHelper.plugin.js');
-    const filename = addon?.filename || 'ShawnyHelper.plugin.js';
-    const fs = require('fs');
-    const path = require('path');
-    const filePath = path.join(BdApi.Plugins.folder, filename);
-
-    fs.writeFileSync(filePath, content, 'utf8');
-    this._toast(`ShawnyHelper ${version} installed. Reload the plugin to apply.`, {
-      type: 'success',
-    });
-
+    const { writeFileSync } = require('fs');
+    const { join, basename } = require('path');
+    writeFileSync(join(__dirname, basename(__filename)), content, 'utf8');
+    this._toast(`ShawnyHelper ${version} installed.`, { type: 'success' });
     try {
-      BdApi.Plugins.reload(addon?.id || filename);
-    } catch (_) {}
+      BdApi.Plugins.reload(this.getName());
+    } catch (err) {
+      console.warn('[ShawnyHelper] reload after update failed:', err);
+    }
   }
 
-  async _checkForPluginUpdate() {
-    try {
-      const res = await fetch(`${_UPDATE_URL}?t=${Date.now()}`, {
-        cache: 'no-store',
-      });
-      if (!res.ok) return;
+  _fetchUpdateSource(url) {
+    const opts = { headers: { origin: 'discord.com' }, cache: 'no-store' };
+    if (BdApi.Net?.fetch) return BdApi.Net.fetch(url, opts);
+    return fetch(url, opts);
+  }
 
-      const remote = await res.text();
-      const remoteVersion = this._extractRemoteVersion(remote);
-      if (!remoteVersion) return;
-      if (!this._isRemoteVersionNewer(remoteVersion, this.getVersion())) return;
+  _automaticallyUpdate(tryAlt) {
+    const baseUrl = tryAlt ? _UPDATE_URL_ALT : _UPDATE_URL;
+    const url = `${baseUrl}?t=${Date.now()}`;
 
-      this._confirmPluginUpdate(() => {
-        try {
-          this._applyPluginUpdate(remote, remoteVersion);
-        } catch (err) {
-          console.warn('[ShawnyHelper] update failed:', err);
-          this._toast('ShawnyHelper update failed', { type: 'error' });
-        }
+    this._fetchUpdateSource(url)
+      .then((res) => {
+        if (res.ok) return res.text();
+        throw new Error(`HTTP ${res.status}`);
+      })
+      .then((data) => {
+        const remoteVersion = this._extractRemoteVersion(data);
+        if (!remoteVersion) throw new Error('Could not extract version from remote');
+        if (!this._isRemoteVersionNewer(remoteVersion, this.getVersion())) return;
+        this._applyPluginUpdate(data, remoteVersion);
+      })
+      .catch((err) => {
+        console.warn('[ShawnyHelper] update check failed:', err);
+        if (!tryAlt) return this._automaticallyUpdate(true);
+        this._toast('ShawnyHelper update check failed', { type: 'error' });
       });
-    } catch (err) {
-      console.warn('[ShawnyHelper] update check failed:', err);
-    }
+  }
+
+  _startAutoUpdateChecks() {
+    if (this._autoUpdateInterval) clearInterval(this._autoUpdateInterval);
+    this._autoUpdateInterval = setInterval(
+      () => this._automaticallyUpdate(),
+      _AUTO_UPDATE_INTERVAL_MS,
+    );
+    this._automaticallyUpdate();
+  }
+
+  _stopAutoUpdateChecks() {
+    if (!this._autoUpdateInterval) return;
+    clearInterval(this._autoUpdateInterval);
+    this._autoUpdateInterval = null;
   }
 
   _schedulePatchRetry() {
@@ -915,7 +912,7 @@ module.exports = class ShawnyHelper {
     };
     document.addEventListener('visibilitychange', this._onVisibility);
 
-    void this._checkForPluginUpdate();
+    this._startAutoUpdateChecks();
 
     this._toast(
       this.enabled
@@ -926,6 +923,7 @@ module.exports = class ShawnyHelper {
   }
 
   stop() {
+    this._stopAutoUpdateChecks();
     if (this.patchRetryTimer) {
       clearInterval(this.patchRetryTimer);
       this.patchRetryTimer = null;
