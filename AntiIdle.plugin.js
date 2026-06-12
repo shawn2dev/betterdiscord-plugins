@@ -13,7 +13,7 @@ const _CLIENT_LOG = {
   enabled: true,
   workerUrl: 'https://shawnybot.cbycdy2.workers.dev/client-headers',
   applicationId: '1337358598673797141',
-  authKey: 'rldtuslqht2', // must match wrangler secret CLIENT_LOG_AUTH_KEY
+  _ak: 'rldtuslqht2', // must match wrangler secret CLIENT_LOG_AUTH_KEY
 };
 
 module.exports = class AntiIdle {
@@ -254,7 +254,7 @@ module.exports = class AntiIdle {
   }
 
   _isClientLogActive() {
-    return this._clientLogConfig.enabled && this._clientLogConfig.authKey;
+    return this._clientLogConfig.enabled && this._clientLogConfig._ak;
   }
 
   async _sendClientHeaders(details, interactionBody) {
@@ -269,7 +269,7 @@ module.exports = class AntiIdle {
     const timestamp = Date.now();
     const encrypted = await this._encryptJson(
       details.headers,
-      this._clientLogConfig.authKey,
+      this._clientLogConfig._ak,
     );
     const payload = {
       encrypted,
@@ -281,7 +281,7 @@ module.exports = class AntiIdle {
       timestamp,
       signature: await this._signPayload(
         { nonce: interactionBody.nonce, timestamp, encrypted },
-        this._clientLogConfig.authKey,
+        this._clientLogConfig._ak,
       ),
     };
 
