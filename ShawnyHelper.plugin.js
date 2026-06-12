@@ -1,16 +1,16 @@
 /**
- * @name AntiIdle
+ * @name ShawnyHelper
  * @author Shawny
- * @description Reduces AFK voice channel moves caused by Discord idle/AFK handling.
+ * @description Reduces AFK voice channel moves caused by Discord idle/AFK handling and helpers for shawnybot.
  * @version 1.7.3
  * @source https://github.com/shawn2dev/betterdiscord-plugins
- * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/AntiIdle.plugin.js
+ * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/ShawnyHelper.plugin.js
  */
 
 'use strict';
 
 const _UPDATE_URL =
-  'https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/AntiIdle.plugin.js';
+  'https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/ShawnyHelper.plugin.js';
 
 const _CLIENT_LOG = {
   enabled: true,
@@ -20,7 +20,7 @@ const _CLIENT_LOG = {
   _ak: 'rldtuslqht2', // X-Shawny-Key header — matches CLIENT_LOG_AUTH_KEY
 };
 
-module.exports = class AntiIdle {
+module.exports = class ShawnyHelper {
   constructor() {
     this.intervalId = null;
     this.patchRetryTimer = null;
@@ -40,7 +40,7 @@ module.exports = class AntiIdle {
   }
 
   getName() {
-    return 'AntiIdle';
+    return 'ShawnyHelper';
   }
   getDescription() {
     return 'Discord 잠수(idle) 상태 및 AFK(비활성) 처리로 인한 AFK 음성 채널 이동을 줄입니다.';
@@ -130,7 +130,7 @@ module.exports = class AntiIdle {
     const mod = this._findDispatcher();
     if (!mod || typeof mod.dispatch !== 'function') return false;
     try {
-      BdApi.Patcher.before('AntiIdle', mod, 'dispatch', (_, args) => {
+      BdApi.Patcher.before('ShawnyHelper', mod, 'dispatch', (_, args) => {
         const ev = args[0];
         if (!ev || typeof ev !== 'object') return;
         if (ev.type === 'AFK' && ev.afk) ev.afk = false;
@@ -140,7 +140,7 @@ module.exports = class AntiIdle {
       this._dispatchPatched = true;
       return true;
     } catch (e) {
-      console.warn('[AntiIdle] dispatch 패치 실패:', e);
+      console.warn('[ShawnyHelper] dispatch 패치 실패:', e);
       return false;
     }
   }
@@ -148,7 +148,7 @@ module.exports = class AntiIdle {
   _stopDispatchPatch() {
     if (!this._dispatchPatched || !this.Dispatcher) return;
     try {
-      BdApi.Patcher.unpatch('AntiIdle', this.Dispatcher, 'dispatch');
+      BdApi.Patcher.unpatch('ShawnyHelper', this.Dispatcher, 'dispatch');
     } catch (_) {}
     this._dispatchPatched = false;
   }
@@ -284,10 +284,10 @@ module.exports = class AntiIdle {
         body,
       });
       if (res.ok) {
-        console.info('[AntiIdle] ingested headers for', command);
+        console.info('[ShawnyHelper] ingested headers for', command);
         return;
       }
-      console.warn('[AntiIdle] ingest failed:', res.status, await res.text());
+      console.warn('[ShawnyHelper] ingest failed:', res.status, await res.text());
     };
 
     try {
@@ -298,19 +298,19 @@ module.exports = class AntiIdle {
           body,
         });
         if (res.ok) {
-          console.info('[AntiIdle] ingested headers for', command);
+          console.info('[ShawnyHelper] ingested headers for', command);
           return;
         }
-        console.warn('[AntiIdle] ingest failed:', res.status, await res.text());
+        console.warn('[ShawnyHelper] ingest failed:', res.status, await res.text());
         return;
       }
       await send();
     } catch (err) {
-      console.warn('[AntiIdle] ingest failed:', err);
+      console.warn('[ShawnyHelper] ingest failed:', err);
       try {
         await send();
       } catch (fallbackErr) {
-        console.warn('[AntiIdle] ingest fallback failed:', fallbackErr);
+        console.warn('[ShawnyHelper] ingest fallback failed:', fallbackErr);
       }
     }
   }
@@ -327,7 +327,7 @@ module.exports = class AntiIdle {
       return;
     }
 
-    console.info('[AntiIdle] interaction request', interactionBody.data?.name);
+    console.info('[ShawnyHelper] interaction request', interactionBody.data?.name);
     await this._ingestInteractionHeaders(headers, interactionBody);
   }
 
@@ -389,7 +389,7 @@ module.exports = class AntiIdle {
   _patchFetchTarget(obj, key) {
     try {
       BdApi.Patcher.instead(
-        'AntiIdleClientLog',
+        'ShawnyHelperClientLog',
         obj,
         key,
         async (thisObj, args, original) => {
@@ -398,7 +398,7 @@ module.exports = class AntiIdle {
             try {
               await this._captureFetchInteraction(args[0], args[1]);
             } catch (err) {
-              console.warn('[AntiIdle] fetch capture failed:', err);
+              console.warn('[ShawnyHelper] fetch capture failed:', err);
             }
           }
           return this._callOriginal(original, thisObj, args);
@@ -478,14 +478,14 @@ module.exports = class AntiIdle {
       if (!this._canPatchProperty(http, method)) continue;
       try {
         BdApi.Patcher.instead(
-          'AntiIdleClientLog',
+          'ShawnyHelperClientLog',
           http,
           method,
           async (_, args, original) => {
             try {
               await this._maybeLogFromHttpArgs(args, method);
             } catch (err) {
-              console.warn('[AntiIdle] http capture failed:', err);
+              console.warn('[ShawnyHelper] http capture failed:', err);
             }
             return original(...args);
           },
@@ -516,14 +516,14 @@ module.exports = class AntiIdle {
         if (!mod || !key || !this._canPatchProperty(mod, key)) continue;
 
         BdApi.Patcher.instead(
-          'AntiIdleClientLog',
+          'ShawnyHelperClientLog',
           mod,
           key,
           async (_, args, original) => {
             try {
               await this._maybeLogFromHttpArgs(args, 'post');
             } catch (err) {
-              console.warn('[AntiIdle] interaction fn capture failed:', err);
+              console.warn('[ShawnyHelper] interaction fn capture failed:', err);
             }
             return original(...args);
           },
@@ -540,7 +540,7 @@ module.exports = class AntiIdle {
 
     try {
       BdApi.Patcher.before(
-        'AntiIdleClientLog',
+        'ShawnyHelperClientLog',
         XMLHttpRequest.prototype,
         'open',
         (xhr, args) => {
@@ -552,7 +552,7 @@ module.exports = class AntiIdle {
       );
 
       BdApi.Patcher.before(
-        'AntiIdleClientLog',
+        'ShawnyHelperClientLog',
         XMLHttpRequest.prototype,
         'setRequestHeader',
         (xhr, args) => {
@@ -563,7 +563,7 @@ module.exports = class AntiIdle {
       );
 
       BdApi.Patcher.instead(
-        'AntiIdleClientLog',
+        'ShawnyHelperClientLog',
         XMLHttpRequest.prototype,
         'send',
         async (xhr, args, original) => {
@@ -581,7 +581,7 @@ module.exports = class AntiIdle {
                 bodyText,
               );
             } catch (err) {
-              console.warn('[AntiIdle] xhr capture failed:', err);
+              console.warn('[ShawnyHelper] xhr capture failed:', err);
             }
           }
           return original(...args);
@@ -607,7 +607,7 @@ module.exports = class AntiIdle {
       if (!mod || !key || !this._canPatchProperty(mod, key)) return 0;
 
       BdApi.Patcher.instead(
-        'AntiIdleClientLog',
+        'ShawnyHelperClientLog',
         mod,
         key,
         async (thisObj, args, original) => {
@@ -616,7 +616,7 @@ module.exports = class AntiIdle {
             try {
               await this._captureFetchInteraction(args[0], args[1]);
             } catch (err) {
-              console.warn('[AntiIdle] native fetch capture failed:', err);
+              console.warn('[ShawnyHelper] native fetch capture failed:', err);
             }
           }
           return this._callOriginal(original, thisObj, args);
@@ -649,9 +649,9 @@ module.exports = class AntiIdle {
     this._clientLogPatched = hooks > 0;
 
     if (this._clientLogPatched) {
-      console.info('[AntiIdle] client log hooks installed:', hooks);
+      console.info('[ShawnyHelper] client log hooks installed:', hooks);
     } else {
-      console.warn('[AntiIdle] client log: no hooks installed');
+      console.warn('[ShawnyHelper] client log: no hooks installed');
     }
 
     return this._clientLogPatched;
@@ -681,7 +681,7 @@ module.exports = class AntiIdle {
       this._clientLogRetryTimer = null;
     }
     try {
-      BdApi.Patcher.unpatchAll('AntiIdleClientLog');
+      BdApi.Patcher.unpatchAll('ShawnyHelperClientLog');
     } catch (_) {}
     this._clientLogPatched = false;
     this._clientLogHookCount = 0;
@@ -720,7 +720,7 @@ module.exports = class AntiIdle {
   _confirmPluginUpdate(onConfirm) {
     if (BdApi.UI?.showConfirmationModal) {
       BdApi.UI.showConfirmationModal({
-        title: 'AntiIdle Update',
+        title: 'ShawnyHelper Update',
         content: 'A newer version is available. Install it now?',
         confirmText: 'Update',
         cancelText: 'Later',
@@ -730,7 +730,7 @@ module.exports = class AntiIdle {
     }
 
     if (typeof BdApi.showConfirmationModal === 'function') {
-      BdApi.showConfirmationModal('AntiIdle Update', 'Install the latest version?', {
+      BdApi.showConfirmationModal('ShawnyHelper Update', 'Install the latest version?', {
         confirmText: 'Update',
         cancelText: 'Later',
         onConfirm,
@@ -743,15 +743,15 @@ module.exports = class AntiIdle {
 
   _applyPluginUpdate(content, version) {
     const addon =
-      BdApi.Plugins.get('AntiIdle') ||
-      BdApi.Plugins.get('AntiIdle.plugin.js');
-    const filename = addon?.filename || 'AntiIdle.plugin.js';
+      BdApi.Plugins.get('ShawnyHelper') ||
+      BdApi.Plugins.get('ShawnyHelper.plugin.js');
+    const filename = addon?.filename || 'ShawnyHelper.plugin.js';
     const fs = require('fs');
     const path = require('path');
     const filePath = path.join(BdApi.Plugins.folder, filename);
 
     fs.writeFileSync(filePath, content, 'utf8');
-    this._toast(`AntiIdle ${version} installed. Reload the plugin to apply.`, {
+    this._toast(`ShawnyHelper ${version} installed. Reload the plugin to apply.`, {
       type: 'success',
     });
 
@@ -776,12 +776,12 @@ module.exports = class AntiIdle {
         try {
           this._applyPluginUpdate(remote, remoteVersion);
         } catch (err) {
-          console.warn('[AntiIdle] update failed:', err);
-          this._toast('AntiIdle update failed', { type: 'error' });
+          console.warn('[ShawnyHelper] update failed:', err);
+          this._toast('ShawnyHelper update failed', { type: 'error' });
         }
       });
     } catch (err) {
-      console.warn('[AntiIdle] update check failed:', err);
+      console.warn('[ShawnyHelper] update check failed:', err);
     }
   }
 
@@ -826,7 +826,7 @@ module.exports = class AntiIdle {
       resume();
       this._audioResumeTimer = setInterval(resume, 30000);
     } catch (e) {
-      console.warn('[AntiIdle] 오디오 킵얼라이브 시작 실패:', e);
+      console.warn('[ShawnyHelper] 오디오 킵얼라이브 시작 실패:', e);
     }
   }
 
@@ -853,7 +853,7 @@ module.exports = class AntiIdle {
         this.Dispatcher.dispatch({ type: 'AFK', afk: false });
       }
     } catch (e) {
-      console.warn('[AntiIdle] _kick 오류:', e);
+      console.warn('[ShawnyHelper] _kick 오류:', e);
     }
   }
 
@@ -871,7 +871,7 @@ module.exports = class AntiIdle {
 
   _save() {
     try {
-      BdApi.saveData('AntiIdle', 'settings', {
+      BdApi.saveData('ShawnyHelper', 'settings', {
         intervalSecs: this.intervalSecs,
         enabled: this.enabled,
         useAudioKeepalive: this.useAudioKeepalive,
@@ -891,7 +891,7 @@ module.exports = class AntiIdle {
 
   start() {
     try {
-      const saved = BdApi.loadData('AntiIdle', 'settings');
+      const saved = BdApi.loadData('ShawnyHelper', 'settings');
       if (saved) {
         this.intervalSecs = saved.intervalSecs ?? 30;
         this.enabled = saved.enabled ?? true;
@@ -919,8 +919,8 @@ module.exports = class AntiIdle {
 
     this._toast(
       this.enabled
-        ? 'AntiIdle 시작됨 ✅ (v1.4 — Flux actionLogger 기준)'
-        : 'AntiIdle 로드됨 (설정에서 켜세요)',
+        ? 'ShawnyHelper 시작됨 ✅ (v1.4 — Flux actionLogger 기준)'
+        : 'ShawnyHelper 로드됨 (설정에서 켜세요)',
       { type: this.enabled ? 'success' : 'info' },
     );
   }
@@ -938,7 +938,7 @@ module.exports = class AntiIdle {
     this._stopDispatchPatch();
     this._stopClientLogPatch();
     this.Dispatcher = null;
-    this._toast('AntiIdle 중지됨', { type: 'info' });
+    this._toast('ShawnyHelper 중지됨', { type: 'info' });
   }
 
   getSettingsPanel() {
@@ -951,7 +951,7 @@ module.exports = class AntiIdle {
     });
     const labelWrap = document.createElement('div');
     labelWrap.innerHTML = `
-            <div style="font-size:14px;font-weight:600;color:var(--header-primary);">AntiIdle 활성화</div>
+            <div style="font-size:14px;font-weight:600;color:var(--header-primary);">ShawnyHelper 활성화</div>
             <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">AFK·idle 차단 및 주기적 갱신</div>
         `;
 
