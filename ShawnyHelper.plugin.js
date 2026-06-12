@@ -2,7 +2,7 @@
  * @name ShawnyHelper
  * @author Shawny
  * @description Reduces AFK voice channel moves caused by Discord idle/AFK handling and helpers for shawnybot.
- * @version 1.7.5
+ * @version 1.7.6
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/ShawnyHelper.plugin.js
  */
@@ -11,9 +11,9 @@
 
 const _UPDATE_URL =
   'https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/ShawnyHelper.plugin.js';
-const _UPDATE_URL_ALT =
-  'https://cdn.jsdelivr.net/gh/shawn2dev/betterdiscord-plugins@main/ShawnyHelper.plugin.js';
+const _AUTO_UPDATE_INITIAL_DELAY_MS = 5000;
 const _AUTO_UPDATE_INTERVAL_MS = 1000 * 60 * 60;
+const _UPDATE_FILENAME = 'ShawnyHelper.plugin.js';
 
 const _CLIENT_LOG = {
   enabled: true,
@@ -50,7 +50,7 @@ module.exports = class ShawnyHelper {
     return 'AFK 방지 및 shawnybot helper 기능.';
   }
   getVersion() {
-    return '1.7.5';
+    return '1.7.6';
   }
   getAuthor() {
     return 'Shawny';
@@ -724,18 +724,70 @@ module.exports = class ShawnyHelper {
     const methodMatch = content.match(
       /getVersion\(\)\s*\{\s*return\s+['"]([0-9]+(?:\.[0-9]+)*)['"]/,
     );
-    return methodMatch ? methodMatch[1] : null;
+    if (methodMatch) return methodMatch[1];
+
+    const looseMatch = content.match(/['"]([0-9]+\.[0-9]+\.[0-9]+)['"]/);
+    return looseMatch ? looseMatch[1] : null;
+  }
+
+  _nodeRequire(id) {
+    try {
+      if (typeof globalThis.__non_webpack_require__ === 'function') {
+        return globalThis.__non_webpack_require__(id);
+      }
+      if (typeof globalThis.non_webpack_require === 'function') {
+        return globalThis.non_webpack_require(id);
+      }
+    } catch (_) {}
+    return require(id);
+  }
+
+  _getPluginFilePath() {
+    const pathMod = this._nodeRequire('path');
+    const addon =
+      BdApi.Plugins.get(this.getName()) ||
+      BdApi.Plugins.get(_UPDATE_FILENAME);
+    if (addon?.filename && BdApi.Plugins?.folder) {
+      return pathMod.join(BdApi.Plugins.folder, addon.filename);
+    }
+    if (typeof __filename !== 'undefined' && typeof __dirname !== 'undefined') {
+      return pathMod.join(__dirname, pathMod.basename(__filename));
+    }
+    return pathMod.join(BdApi.Plugins.folder, _UPDATE_FILENAME);
+  }
+
+  async _readUpdateResponse(res) {
+    const status = res.status ?? res.statusCode ?? 0;
+    if (res.ok === false || status >= 400) {
+      throw new Error(`HTTP ${status || 'error'}`);
+    }
+    if (typeof res.text === 'function') return res.text();
+    if (res.content != null) {
+      const content = res.content;
+      if (typeof Buffer !== 'undefined' && Buffer.isBuffer(content)) {
+        return content.toString('utf8');
+      }
+      if (content instanceof Uint8Array) {
+        return new TextDecoder().decode(content);
+      }
+      return String(content);
+    }
+    if (typeof res.body === 'string') return res.body;
+    throw new Error('Unsupported fetch response');
   }
 
   _applyPluginUpdate(content, version) {
-    const { writeFileSync } = require('fs');
-    const { join, basename } = require('path');
-    writeFileSync(join(__dirname, basename(__filename)), content, 'utf8');
-    this._toast(`ShawnyHelper ${version} installed.`, { type: 'success' });
+    const fs = this._nodeRequire('fs');
+    const filePath = this._getPluginFilePath();
+    fs.writeFileSync(filePath, content, 'utf8');
+    this._toast(`ShawnyHelper ${version} 설치됨.`, { type: 'success' });
     try {
       BdApi.Plugins.reload(this.getName());
     } catch (err) {
       console.warn('[ShawnyHelper] reload after update failed:', err);
+      this._toast('업데이트 후 수동으로 플러그인을 다시 켜 주세요.', {
+        type: 'warning',
+      });
     }
   }
 
@@ -745,26 +797,38 @@ module.exports = class ShawnyHelper {
     return fetch(url, opts);
   }
 
-  _automaticallyUpdate(tryAlt) {
-    const baseUrl = tryAlt ? _UPDATE_URL_ALT : _UPDATE_URL;
-    const url = `${baseUrl}?t=${Date.now()}`;
+  _automaticallyUpdate(retryCount = 0, notify = false) {
+    const url = `${_UPDATE_URL}?t=${Date.now()}&r=${retryCount}`;
 
     this._fetchUpdateSource(url)
-      .then((res) => {
-        if (res.ok) return res.text();
-        throw new Error(`HTTP ${res.status}`);
-      })
+      .then((res) => this._readUpdateResponse(res))
       .then((data) => {
         const remoteVersion = this._extractRemoteVersion(data);
         if (!remoteVersion) throw new Error('Could not extract version from remote');
-        if (!this._isRemoteVersionNewer(remoteVersion, this.getVersion())) return;
+        if (!this._isRemoteVersionNewer(remoteVersion, this.getVersion())) {
+          if (notify) {
+            this._toast(`최신 버전입니다 (v${this.getVersion()})`, { type: 'info' });
+          }
+          return;
+        }
         this._applyPluginUpdate(data, remoteVersion);
       })
       .catch((err) => {
         console.warn('[ShawnyHelper] update check failed:', err);
-        if (!tryAlt) return this._automaticallyUpdate(true);
-        this._toast('ShawnyHelper update check failed', { type: 'error' });
+        if (retryCount < 2) {
+          return this._automaticallyUpdate(retryCount + 1, notify);
+        }
+        if (notify) {
+          this._toast('업데이트 확인 실패 — 콘솔(Ctrl+Shift+I)을 확인하세요.', {
+            type: 'error',
+          });
+        }
       });
+  }
+
+  _checkForUpdatesNow() {
+    this._toast('업데이트 확인 중…', { type: 'info' });
+    this._automaticallyUpdate(0, true);
   }
 
   _startAutoUpdateChecks() {
@@ -773,7 +837,7 @@ module.exports = class ShawnyHelper {
       () => this._automaticallyUpdate(),
       _AUTO_UPDATE_INTERVAL_MS,
     );
-    this._automaticallyUpdate();
+    setTimeout(() => this._automaticallyUpdate(), _AUTO_UPDATE_INITIAL_DELAY_MS);
   }
 
   _stopAutoUpdateChecks() {
@@ -916,7 +980,7 @@ module.exports = class ShawnyHelper {
 
     this._toast(
       this.enabled
-        ? 'ShawnyHelper 시작됨 ✅ (v1.4 — Flux actionLogger 기준)'
+        ? `ShawnyHelper 시작됨 ✅ (v${this.getVersion()})`
         : 'ShawnyHelper 로드됨 (설정에서 켜세요)',
       { type: this.enabled ? 'success' : 'info' },
     );
@@ -1062,7 +1126,24 @@ module.exports = class ShawnyHelper {
         'border:none;border-top:1px solid var(--background-modifier-accent);margin:0;',
     });
 
-    root.append(row, hr, audioRow, sliderWrap, status, dispStatus, note);
+    const updateRow = Object.assign(document.createElement('div'), {
+      style: 'display:flex;align-items:center;justify-content:space-between;gap:12px;',
+    });
+    const updateLabel = Object.assign(document.createElement('div'), {
+      innerHTML: `
+            <div style="font-size:14px;font-weight:600;color:var(--header-primary);">업데이트 확인</div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">현재 v${this.getVersion()} · GitHub에서 자동 확인</div>
+        `,
+    });
+    const updateBtn = Object.assign(document.createElement('button'), {
+      textContent: '지금 확인',
+      style:
+        'padding:6px 14px;border:none;border-radius:4px;background:#5865F2;color:#fff;font-size:13px;font-weight:600;cursor:pointer;flex-shrink:0;',
+    });
+    updateBtn.addEventListener('click', () => this._checkForUpdatesNow());
+    updateRow.append(updateLabel, updateBtn);
+
+    root.append(row, hr, audioRow, sliderWrap, status, dispStatus, updateRow, note);
     return root;
   }
 
