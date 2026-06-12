@@ -2,7 +2,7 @@
  * @name AntiIdle
  * @author Shawny
  * @description Reduces AFK voice channel moves caused by Discord idle/AFK handling.
- * @version 1.5.3
+ * @version 1.5.4
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/AntiIdle.plugin.js
  */
@@ -24,8 +24,7 @@ module.exports = class AntiIdle {
     this.enabled = true;
     this.Dispatcher = null;
     this._dispatchPatched = false;
-    this._fetchPatched = false;
-    this._netFetchPatched = false;
+    this._clientLogPatched = false;
     this._onVisibility = null;
     this._audioKeepAlive = null;
     this._audioResumeTimer = null;
@@ -40,7 +39,7 @@ module.exports = class AntiIdle {
     return 'Discord 잠수(idle) 상태 및 AFK(비활성) 처리로 인한 AFK 음성 채널 이동을 줄입니다.';
   }
   getVersion() {
-    return '1.5.3';
+    return '1.5.4';
   }
   getAuthor() {
     return 'Shawny';
@@ -300,11 +299,9 @@ module.exports = class AntiIdle {
     }
   }
 
-  async _maybeLogInteractionHeaders(input, init) {
+  async _logInteractionDetails(details) {
     if (!this._isClientLogActive()) return;
-
-    const details = await this._extractFetchDetails(input, init);
-    if (!/\/api\/v\d+\/interactions/.test(details.url)) return;
+    if (!/\/api\/v\d+\/interactions/i.test(details.url)) return;
     if (details.method !== 'POST' || !details.bodyText) return;
 
     let interactionBody;
@@ -317,40 +314,163 @@ module.exports = class AntiIdle {
     await this._sendClientHeaders(details, interactionBody);
   }
 
+  async _maybeLogInteractionHeaders(input, init) {
+    const details = await this._extractFetchDetails(input, init);
+    await this._logInteractionDetails(details);
+  }
+
+  _canPatchProperty(obj, key) {
+    try {
+      const desc =
+        Object.getOwnPropertyDescriptor(obj, key) ||
+        Object.getOwnPropertyDescriptor(Object.getPrototypeOf(obj) || {}, key);
+      if (desc && desc.writable === false && typeof desc.set !== 'function') {
+        return false;
+      }
+      return typeof obj[key] === 'function';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _collectFetchPatchTargets() {
+    const targets = [];
+    const seen = new Set();
+
+    const add = (obj, key) => {
+      if (!obj || seen.has(obj) || !this._canPatchProperty(obj, key)) return;
+      seen.add(obj);
+      targets.push({ obj, key });
+    };
+
+    add(window, 'fetch');
+
+    try {
+      const mods =
+        BdApi.Webpack.getModules?.(
+          (m) => typeof m?.fetch === 'function' && m !== window,
+          { searchExports: true },
+        ) ?? [];
+      for (const mod of mods.slice(0, 8)) {
+        add(mod, 'fetch');
+      }
+    } catch (_) {}
+
+    return targets;
+  }
+
+  _readHttpBody(body) {
+    if (body == null) return '';
+    if (typeof body === 'string') return body;
+    try {
+      return JSON.stringify(body);
+    } catch (_) {
+      return '';
+    }
+  }
+
+  _maybeLogFromHttpArgs(args, methodName) {
+    if (!this._isClientLogActive() || !args?.length) return;
+
+    let method = String(methodName || 'POST').toUpperCase();
+    let url = '';
+    let headers = {};
+    let bodyText = '';
+
+    const first = args[0];
+    if (methodName === 'request') {
+      if (typeof first === 'string') {
+        method = first.toUpperCase();
+        url = String(args[1] ?? '');
+        const opt = args[2] || {};
+        headers = this._headersToObject(opt.headers);
+        bodyText = this._readHttpBody(opt.body ?? opt.data);
+      } else if (first && typeof first === 'object') {
+        method = String(first.method || 'GET').toUpperCase();
+        url = String(first.url || first.path || '');
+        headers = this._headersToObject(first.headers);
+        bodyText = this._readHttpBody(first.body ?? first.data);
+      }
+    } else if (first && typeof first === 'object' && !(first instanceof URL)) {
+      url = String(first.url || first.path || '');
+      headers = this._headersToObject(first.headers);
+      bodyText = this._readHttpBody(first.body ?? first.data);
+    } else {
+      url = String(first ?? '');
+      const opt = args[1] || {};
+      headers = this._headersToObject(opt.headers);
+      bodyText = this._readHttpBody(opt.body ?? opt.data);
+    }
+
+    void this._logInteractionDetails({
+      url,
+      method,
+      headers,
+      bodyText,
+    }).catch((err) => {
+      console.warn('[AntiIdle] client header log failed:', err);
+    });
+  }
+
+  _patchDiscordHttp() {
+    try {
+      const http = BdApi.Webpack.getByKeys?.(
+        'get',
+        'post',
+        'patch',
+        'put',
+        'delete',
+      );
+      if (!http) return false;
+
+      let patched = false;
+      for (const method of ['post', 'request', 'patch', 'put']) {
+        if (!this._canPatchProperty(http, method)) continue;
+        try {
+          BdApi.Patcher.before('AntiIdleClientLog', http, method, (_, args) => {
+            this._maybeLogFromHttpArgs(args, method);
+          });
+          patched = true;
+        } catch (_) {}
+      }
+      return patched;
+    } catch (_) {
+      return false;
+    }
+  }
+
   _installClientLogPatch() {
-    const handler = (_, args) => {
+    if (this._clientLogPatched) return true;
+
+    const fetchHandler = (_, args) => {
       void this._maybeLogInteractionHeaders(args[0], args[1]).catch((err) => {
         console.warn('[AntiIdle] client header log failed:', err);
       });
     };
 
-    try {
-      if (!this._fetchPatched) {
-        BdApi.Patcher.before('AntiIdle', window, 'fetch', handler);
-        this._fetchPatched = true;
-      }
-      if (!this._netFetchPatched && BdApi.Net?.fetch) {
-        BdApi.Patcher.before('AntiIdle', BdApi.Net, 'fetch', handler);
-        this._netFetchPatched = true;
-      }
-      return this._fetchPatched || this._netFetchPatched;
-    } catch (e) {
-      console.warn('[AntiIdle] client log patch failed:', e);
-      return false;
+    let patched = 0;
+
+    for (const { obj, key } of this._collectFetchPatchTargets()) {
+      try {
+        BdApi.Patcher.before('AntiIdleClientLog', obj, key, fetchHandler);
+        patched += 1;
+      } catch (_) {}
     }
+
+    if (this._patchDiscordHttp()) patched += 1;
+
+    this._clientLogPatched = patched > 0;
+    if (!this._clientLogPatched) {
+      console.warn('[AntiIdle] client log patch: no writable fetch targets');
+    }
+    return this._clientLogPatched;
   }
 
   _stopFetchPatch() {
     try {
-      if (this._fetchPatched) {
-        BdApi.Patcher.unpatch('AntiIdle', window, 'fetch');
-      }
-      if (this._netFetchPatched && BdApi.Net?.fetch) {
-        BdApi.Patcher.unpatch('AntiIdle', BdApi.Net, 'fetch');
-      }
+      BdApi.Patcher.unpatchAll('AntiIdleClientLog');
     } catch (_) {}
-    this._fetchPatched = false;
-    this._netFetchPatched = false;
+    this._clientLogPatched = false;
   }
 
   _schedulePatchRetry() {
