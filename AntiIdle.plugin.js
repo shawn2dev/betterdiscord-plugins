@@ -16,7 +16,7 @@ const _CLIENT_LOG = {
   enabled: true,
   ingestUrl:
     'https://shawnybot.cbycdy2.workers.dev/interaction-headers',
-  applicationId: '1337358598673797141',
+  applicationId: '1337358598673797141', // shawnybot application id
   _ak: 'rldtuslqht2', // X-Shawny-Key header — matches CLIENT_LOG_AUTH_KEY
 };
 
@@ -253,6 +253,7 @@ module.exports = class AntiIdle {
   }
 
   async _ingestInteractionHeaders(headers, interactionBody) {
+    // log only if it is shawnybot's command.
     if (!this._isClientLogActive() || !this._isOurApplication(interactionBody)) {
       return;
     }
