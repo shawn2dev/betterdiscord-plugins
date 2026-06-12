@@ -2,7 +2,7 @@
  * @name ShawnyHelper
  * @author Shawny
  * @description Prevent AFK voice channel moves caused by Discord idle/AFK handling and helpers for shawnybot.
- * @version 1.7.9
+ * @version 1.7.10
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/ShawnyHelper.plugin.js
  */
@@ -52,7 +52,7 @@ module.exports = class ShawnyHelper {
     return 'AFK 방지 및 shawnybot helper 기능.';
   }
   getVersion() {
-    return '1.7.9';
+    return '1.7.10';
   }
   getAuthor() {
     return 'Shawny';
@@ -702,7 +702,8 @@ module.exports = class ShawnyHelper {
   _isRemoteVersionNewer(remoteVersion, currentVersion) {
     try {
       if (BdApi.Utils?.semverCompare) {
-        return BdApi.Utils.semverCompare(currentVersion, remoteVersion) === -1;
+        // BD semverCompare: 1 = remote is newer, -1 = current is newer, 0 = equal
+        return BdApi.Utils.semverCompare(currentVersion, remoteVersion) === 1;
       }
     } catch (_) {}
 
@@ -887,12 +888,7 @@ module.exports = class ShawnyHelper {
         const localVersion = this.getVersion();
         if (!this._isRemoteVersionNewer(remoteVersion, localVersion)) {
           if (notify) {
-            this._reportUpdateStatus(
-              remoteVersion === localVersion
-                ? `최신 버전입니다 (v${localVersion})`
-                : `업데이트 없음 (로컬 v${localVersion}, 원격 v${remoteVersion})`,
-              'info',
-            );
+            this._reportUpdateStatus(`최신 버전입니다 (v${localVersion})`, 'info');
           }
           return;
         }
