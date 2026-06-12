@@ -2,18 +2,20 @@
  * @name ShawnyHelper
  * @author Shawny
  * @description Prevent AFK voice channel moves caused by Discord idle/AFK handling and helpers for shawnybot.
- * @version 1.7.7
+ * @version 1.7.8
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/ShawnyHelper.plugin.js
  */
 
 'use strict';
 
-const _UPDATE_URL =
-  'https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/ShawnyHelper.plugin.js';
+const _UPDATE_FILENAME = 'ShawnyHelper.plugin.js';
+const _UPDATE_REPO = 'shawn2dev/betterdiscord-plugins';
+const _UPDATE_BRANCH = 'main';
+const _UPDATE_RAW_PATH = `${_UPDATE_REPO}/${_UPDATE_BRANCH}/${_UPDATE_FILENAME}`;
+const _UPDATE_COMMITS_URL = `https://api.github.com/repos/${_UPDATE_REPO}/commits/${_UPDATE_BRANCH}`;
 const _AUTO_UPDATE_INITIAL_DELAY_MS = 5000;
 const _AUTO_UPDATE_INTERVAL_MS = 1000 * 60 * 60;
-const _UPDATE_FILENAME = 'ShawnyHelper.plugin.js';
 
 const _CLIENT_LOG = {
   enabled: true,
@@ -50,7 +52,7 @@ module.exports = class ShawnyHelper {
     return 'AFK 방지 및 shawnybot helper 기능.';
   }
   getVersion() {
-    return '1.7.7';
+    return '1.7.8';
   }
   getAuthor() {
     return 'Shawny';
@@ -758,10 +760,16 @@ module.exports = class ShawnyHelper {
 
   async _readUpdateResponse(res) {
     const status = res.status ?? res.statusCode ?? 0;
-    if (res.ok === false || status >= 400) {
-      throw new Error(`HTTP ${status || 'error'}`);
+    const ok = typeof res.ok === 'boolean' ? res.ok : status >= 200 && status < 300;
+    if (!ok && status !== 0) {
+      throw new Error(`HTTP ${status}`);
     }
-    if (typeof res.text === 'function') return res.text();
+
+    if (typeof res.text === 'function') {
+      const text = await res.text();
+      if (text) return text;
+    }
+
     if (res.content != null) {
       const content = res.content;
       if (typeof Buffer !== 'undefined' && Buffer.isBuffer(content)) {
@@ -772,8 +780,9 @@ module.exports = class ShawnyHelper {
       }
       return String(content);
     }
-    if (typeof res.body === 'string') return res.body;
-    throw new Error('Unsupported fetch response');
+
+    if (typeof res.body === 'string' && res.body) return res.body;
+    throw new Error('Empty or unsupported fetch response');
   }
 
   _applyPluginUpdate(content, version) {
@@ -791,26 +800,103 @@ module.exports = class ShawnyHelper {
     }
   }
 
-  _fetchUpdateSource(url) {
-    const opts = { headers: { origin: 'discord.com' }, cache: 'no-store' };
+  _updateFetchHeaders(extra = {}) {
+    return {
+      origin: 'discord.com',
+      Accept: 'application/vnd.github.raw+json, text/plain, */*',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      Pragma: 'no-cache',
+      ...extra,
+    };
+  }
+
+  _fetchUpdateSource(url, extraHeaders = {}) {
+    const opts = { headers: this._updateFetchHeaders(extraHeaders) };
     if (BdApi.Net?.fetch) return BdApi.Net.fetch(url, opts);
-    return fetch(url, opts);
+    return fetch(url, { ...opts, cache: 'no-store' });
+  }
+
+  _fetchUpdateViaXHR(url) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', url, true);
+      xhr.setRequestHeader('Cache-Control', 'no-cache, no-store');
+      xhr.setRequestHeader('Pragma', 'no-cache');
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300 && xhr.responseText) {
+          resolve(xhr.responseText);
+          return;
+        }
+        reject(new Error(`XHR HTTP ${xhr.status || 'error'}`));
+      };
+      xhr.onerror = () => reject(new Error('XHR network error'));
+      xhr.send();
+    });
+  }
+
+  _buildUpdateRawUrl(bust, commitSha) {
+    if (commitSha) {
+      return `https://raw.githubusercontent.com/${_UPDATE_REPO}/${commitSha}/${_UPDATE_FILENAME}`;
+    }
+    return `https://raw.githubusercontent.com/${_UPDATE_REPO}/refs/heads/${_UPDATE_BRANCH}/${_UPDATE_FILENAME}?bust=${bust}`;
+  }
+
+  async _fetchLatestCommitSha() {
+    const res = await this._fetchUpdateSource(_UPDATE_COMMITS_URL, {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'ShawnyHelper-Updater',
+    });
+    const text = await this._readUpdateResponse(res);
+    const commit = JSON.parse(text);
+    if (!commit?.sha) throw new Error('Could not resolve latest commit SHA');
+    return commit.sha;
+  }
+
+  async _downloadRemotePlugin(retryCount = 0) {
+    const bust = Date.now();
+    let url = this._buildUpdateRawUrl(`${bust}&r=${retryCount}`);
+
+    if (retryCount >= 1) {
+      try {
+        const sha = await this._fetchLatestCommitSha();
+        url = this._buildUpdateRawUrl(bust, sha);
+      } catch (err) {
+        console.warn('[ShawnyHelper] commit SHA lookup failed:', err);
+      }
+    }
+
+    try {
+      const res = await this._fetchUpdateSource(url);
+      return this._readUpdateResponse(res);
+    } catch (netErr) {
+      console.warn('[ShawnyHelper] Net.fetch update failed, trying XHR:', netErr);
+      return this._fetchUpdateViaXHR(url);
+    }
+  }
+
+  _reportUpdateStatus(message, type = 'info') {
+    this._toast(message, { type });
   }
 
   _automaticallyUpdate(retryCount = 0, notify = false) {
-    const url = `${_UPDATE_URL}?t=${Date.now()}&r=${retryCount}`;
-
-    this._fetchUpdateSource(url)
-      .then((res) => this._readUpdateResponse(res))
+    this._downloadRemotePlugin(retryCount)
       .then((data) => {
         const remoteVersion = this._extractRemoteVersion(data);
         if (!remoteVersion) throw new Error('Could not extract version from remote');
-        if (!this._isRemoteVersionNewer(remoteVersion, this.getVersion())) {
+
+        const localVersion = this.getVersion();
+        if (!this._isRemoteVersionNewer(remoteVersion, localVersion)) {
           if (notify) {
-            this._toast(`최신 버전입니다 (v${this.getVersion()})`, { type: 'info' });
+            this._reportUpdateStatus(
+              remoteVersion === localVersion
+                ? `최신 버전입니다 (v${localVersion})`
+                : `업데이트 없음 (로컬 v${localVersion}, 원격 v${remoteVersion})`,
+              'info',
+            );
           }
           return;
         }
+
         this._applyPluginUpdate(data, remoteVersion);
       })
       .catch((err) => {
@@ -819,9 +905,10 @@ module.exports = class ShawnyHelper {
           return this._automaticallyUpdate(retryCount + 1, notify);
         }
         if (notify) {
-          this._toast('업데이트 확인 실패 — 콘솔(Ctrl+Shift+I)을 확인하세요.', {
-            type: 'error',
-          });
+          this._reportUpdateStatus(
+            `업데이트 확인 실패: ${err?.message || err}`,
+            'error',
+          );
         }
       });
   }
