@@ -596,7 +596,7 @@ module.exports = class AntiIdle {
     this._stopInterval();
     this._stopAudioKeepAlive();
     this._stopDispatchPatch();
-    this._stopFetchPatch();
+    this._stopClientLogPatch();
     this.Dispatcher = null;
     this._toast('AntiIdle 중지됨', { type: 'info' });
   }
