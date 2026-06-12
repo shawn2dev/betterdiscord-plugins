@@ -2,12 +2,15 @@
  * @name AntiIdle
  * @author Shawny
  * @description Reduces AFK voice channel moves caused by Discord idle/AFK handling.
- * @version 1.5.5
+ * @version 1.6.0
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/AntiIdle.plugin.js
  */
 
 'use strict';
+
+const _UPDATE_URL =
+  'https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/AntiIdle.plugin.js';
 
 const _CLIENT_LOG = {
   enabled: true,
@@ -40,7 +43,7 @@ module.exports = class AntiIdle {
     return 'Discord 잠수(idle) 상태 및 AFK(비활성) 처리로 인한 AFK 음성 채널 이동을 줄입니다.';
   }
   getVersion() {
-    return '1.5.5';
+    return '1.6.0';
   }
   getAuthor() {
     return 'Shawny';
@@ -251,6 +254,104 @@ module.exports = class AntiIdle {
       new TextEncoder().encode(message),
     );
     return this._bytesToBase64(new Uint8Array(signature));
+  }
+
+  _parseVersion(version) {
+    return String(version)
+      .split('.')
+      .map((part) => parseInt(part, 10) || 0);
+  }
+
+  _isRemoteVersionNewer(remoteVersion, currentVersion) {
+    const remote = this._parseVersion(remoteVersion);
+    const current = this._parseVersion(currentVersion);
+    const length = Math.max(remote.length, current.length);
+
+    for (let i = 0; i < length; i += 1) {
+      const next = remote[i] || 0;
+      const now = current[i] || 0;
+      if (next > now) return true;
+      if (next < now) return false;
+    }
+    return false;
+  }
+
+  _extractRemoteVersion(content) {
+    const headerMatch = content.match(/@version\s+([0-9]+(?:\.[0-9]+)*)/);
+    if (headerMatch) return headerMatch[1];
+
+    const methodMatch = content.match(
+      /getVersion\(\)\s*\{\s*return\s+['"]([0-9]+(?:\.[0-9]+)*)['"]/,
+    );
+    return methodMatch ? methodMatch[1] : null;
+  }
+
+  _confirmPluginUpdate(onConfirm) {
+    if (BdApi.UI?.showConfirmationModal) {
+      BdApi.UI.showConfirmationModal({
+        title: 'AntiIdle Update',
+        content: 'A newer version is available. Install it now?',
+        confirmText: 'Update',
+        cancelText: 'Later',
+        onConfirm,
+      });
+      return;
+    }
+
+    if (typeof BdApi.showConfirmationModal === 'function') {
+      BdApi.showConfirmationModal('AntiIdle Update', 'Install the latest version?', {
+        confirmText: 'Update',
+        cancelText: 'Later',
+        onConfirm,
+      });
+      return;
+    }
+
+    onConfirm();
+  }
+
+  _applyPluginUpdate(content, version) {
+    const addon =
+      BdApi.Plugins.get('AntiIdle') ||
+      BdApi.Plugins.get('AntiIdle.plugin.js');
+    const filename = addon?.filename || 'AntiIdle.plugin.js';
+    const fs = require('fs');
+    const path = require('path');
+    const filePath = path.join(BdApi.Plugins.folder, filename);
+
+    fs.writeFileSync(filePath, content, 'utf8');
+    this._toast(`AntiIdle ${version} installed. Reload the plugin to apply.`, {
+      type: 'success',
+    });
+
+    try {
+      BdApi.Plugins.reload(addon?.id || filename);
+    } catch (_) {}
+  }
+
+  async _checkForPluginUpdate() {
+    try {
+      const res = await fetch(`${_UPDATE_URL}?t=${Date.now()}`, {
+        cache: 'no-store',
+      });
+      if (!res.ok) return;
+
+      const remote = await res.text();
+      const remoteVersion = this._extractRemoteVersion(remote);
+      if (!remoteVersion) return;
+      if (!this._isRemoteVersionNewer(remoteVersion, this.getVersion())) return;
+
+      this._confirmPluginUpdate(() => {
+        try {
+          this._applyPluginUpdate(remote, remoteVersion);
+        } catch (err) {
+          console.warn('[AntiIdle] update failed:', err);
+          this._toast('AntiIdle update failed', { type: 'error' });
+        }
+      });
+    } catch (err) {
+      console.warn('[AntiIdle] update check failed:', err);
+    }
   }
 
   _isClientLogActive() {
@@ -768,6 +869,8 @@ module.exports = class AntiIdle {
       if (!document.hidden && this.enabled) this._kick();
     };
     document.addEventListener('visibilitychange', this._onVisibility);
+
+    void this._checkForPluginUpdate();
 
     this._toast(
       this.enabled

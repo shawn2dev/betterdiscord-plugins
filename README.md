@@ -14,4 +14,4 @@ https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/AntiIdle.
 
 Or clone this repo and copy `AntiIdle.plugin.js` into your BetterDiscord plugins folder.
 
-Updates are automatic when `@updateUrl` is set (included in the plugin header).
+Updates: BetterDiscord no longer uses `@updateUrl` for third-party plugins. AntiIdle checks GitHub on startup and prompts when a newer version is available.
