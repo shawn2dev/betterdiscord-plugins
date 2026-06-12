@@ -2,7 +2,7 @@
  * @name AntiIdle
  * @author Shawny
  * @description Reduces AFK voice channel moves caused by Discord idle/AFK handling.
- * @version 1.6.0
+ * @version 1.6.1
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/AntiIdle.plugin.js
  */
@@ -28,7 +28,6 @@ module.exports = class AntiIdle {
     this.Dispatcher = null;
     this._dispatchPatched = false;
     this._clientLogPatched = false;
-    this._xhrMeta = new WeakMap();
     this._onVisibility = null;
     this._audioKeepAlive = null;
     this._audioResumeTimer = null;
@@ -43,7 +42,7 @@ module.exports = class AntiIdle {
     return 'Discord 잠수(idle) 상태 및 AFK(비활성) 처리로 인한 AFK 음성 채널 이동을 줄입니다.';
   }
   getVersion() {
-    return '1.6.0';
+    return '1.6.1';
   }
   getAuthor() {
     return 'Shawny';
@@ -455,7 +454,25 @@ module.exports = class AntiIdle {
     await this._sendClientHeaders(details, interactionBody);
   }
 
+  _callOriginal(original, thisObj, args) {
+    return Reflect.apply(original, thisObj, args);
+  }
+
+  async _getFetchUrl(input, init = {}) {
+    if (typeof Request !== 'undefined' && input instanceof Request) {
+      return input.url;
+    }
+    if (input && typeof input === 'object' && input.url) {
+      return String(input.url);
+    }
+    return String(input ?? init?.url ?? '');
+  }
+
   async _maybeLogInteractionHeaders(input, init) {
+    if (!this._isClientLogActive()) return;
+    const url = await this._getFetchUrl(input, init);
+    if (!this._isInteractionsUrl(url)) return;
+
     const details = await this._extractFetchDetails(input, init);
     await this._logInteractionDetails(details);
   }
@@ -488,17 +505,6 @@ module.exports = class AntiIdle {
     if (globalThis.fetch && globalThis.fetch !== window.fetch) {
       add(globalThis, 'fetch');
     }
-
-    try {
-      const mods =
-        BdApi.Webpack.getModules?.(
-          (m) => typeof m?.fetch === 'function' && m !== window,
-          { searchExports: true },
-        ) ?? [];
-      for (const mod of mods.slice(0, 16)) {
-        add(mod, 'fetch');
-      }
-    } catch (_) {}
 
     return targets;
   }
@@ -550,150 +556,46 @@ module.exports = class AntiIdle {
   async _maybeLogFromHttpArgs(args, methodName) {
     if (!this._isClientLogActive() || !args?.length) return;
     const details = this._extractHttpDetails(args, methodName);
+    if (!this._isInteractionsUrl(details.url)) return;
     await this._logInteractionDetails(details);
   }
 
-  _findHttpModules() {
-    const modules = [];
-    const seen = new Set();
-    const add = (mod) => {
-      if (!mod || seen.has(mod)) return;
-      seen.add(mod);
-      modules.push(mod);
-    };
-
+  _findHttpModule() {
     const finders = [
       () => BdApi.Webpack.getByKeys?.('get', 'post', 'patch', 'put', 'del'),
       () => BdApi.Webpack.getByKeys?.('get', 'post', 'patch', 'put', 'delete'),
-      () => BdApi.Webpack.getByKeys?.('request', 'get', 'post'),
-      () => BdApi.Webpack.getByKeys?.('HTTP', 'get', 'post'),
     ];
 
     for (const find of finders) {
       try {
-        add(find());
+        const mod = find();
+        if (mod?.post) return mod;
       } catch (_) {}
     }
 
-    return modules;
+    return null;
   }
 
   _patchDiscordHttp() {
-    let patched = false;
+    const http = this._findHttpModule();
+    if (!http || !this._canPatchProperty(http, 'post')) return false;
 
-    for (const http of this._findHttpModules()) {
-      for (const method of ['post', 'request', 'patch', 'put']) {
-        if (!this._canPatchProperty(http, method)) continue;
-        try {
-          BdApi.Patcher.instead(
-            'AntiIdleClientLog',
-            http,
-            method,
-            async (_, args, original) => {
-              try {
-                await this._maybeLogFromHttpArgs(args, method);
-              } catch (err) {
-                console.warn('[AntiIdle] client header log failed:', err);
-              }
-              return original(...args);
-            },
-          );
-          patched = true;
-        } catch (_) {}
-      }
-    }
-
-    return patched;
-  }
-
-  _patchInteractionFunctions() {
-    const filters = [
-      (m) =>
-        typeof m === 'function' && /\/interactions/i.test(m.toString()),
-      (m) =>
-        typeof m === 'function' &&
-        /api\/v\d+\/interactions/i.test(m.toString()),
-    ];
-    let patched = false;
-
-    for (const filter of filters) {
-      try {
-        const result = BdApi.Webpack.getWithKey?.(filter, {
-          searchExports: true,
-        });
-        if (!result) continue;
-        const [mod, key] = result;
-        if (!mod || !key || !this._canPatchProperty(mod, key)) continue;
-        BdApi.Patcher.instead(
-          'AntiIdleClientLog',
-          mod,
-          key,
-          async (_, args, original) => {
+    try {
+      BdApi.Patcher.instead(
+        'AntiIdleClientLog',
+        http,
+        'post',
+        async (thisObj, args, original) => {
+          if (this._isClientLogActive()) {
             try {
               await this._maybeLogFromHttpArgs(args, 'post');
             } catch (err) {
               console.warn('[AntiIdle] client header log failed:', err);
             }
-            return original(...args);
-          },
-        );
-        patched = true;
-      } catch (_) {}
-    }
-
-    return patched;
-  }
-
-  _patchXHR() {
-    if (typeof XMLHttpRequest === 'undefined') return false;
-
-    try {
-      BdApi.Patcher.before(
-        'AntiIdleClientLog',
-        XMLHttpRequest.prototype,
-        'open',
-        (xhr, args) => {
-          const meta = this._xhrMeta.get(xhr) || { headers: {} };
-          meta.method = String(args[0] || 'GET').toUpperCase();
-          meta.url = String(args[1] || '');
-          this._xhrMeta.set(xhr, meta);
-        },
-      );
-
-      BdApi.Patcher.before(
-        'AntiIdleClientLog',
-        XMLHttpRequest.prototype,
-        'setRequestHeader',
-        (xhr, args) => {
-          const meta = this._xhrMeta.get(xhr);
-          if (!meta) return;
-          meta.headers[String(args[0]).toLowerCase()] = String(args[1]);
-        },
-      );
-
-      BdApi.Patcher.instead(
-        'AntiIdleClientLog',
-        XMLHttpRequest.prototype,
-        'send',
-        async (xhr, args, original) => {
-          const meta = this._xhrMeta.get(xhr);
-          if (meta?.url && this._isInteractionsUrl(meta.url)) {
-            try {
-              const bodyText = typeof args[0] === 'string' ? args[0] : '';
-              await this._logInteractionDetails({
-                url: meta.url,
-                method: meta.method,
-                headers: meta.headers,
-                bodyText,
-              });
-            } catch (err) {
-              console.warn('[AntiIdle] client header log failed:', err);
-            }
           }
-          return original(...args);
+          return this._callOriginal(original, thisObj, args);
         },
       );
-
       return true;
     } catch (_) {
       return false;
@@ -711,13 +613,15 @@ module.exports = class AntiIdle {
           'AntiIdleClientLog',
           obj,
           key,
-          async (_, args, original) => {
-            try {
-              await this._maybeLogInteractionHeaders(args[0], args[1]);
-            } catch (err) {
-              console.warn('[AntiIdle] client header log failed:', err);
+          async (thisObj, args, original) => {
+            if (this._isClientLogActive()) {
+              try {
+                await this._maybeLogInteractionHeaders(args[0], args[1]);
+              } catch (err) {
+                console.warn('[AntiIdle] client header log failed:', err);
+              }
             }
-            return original(...args);
+            return this._callOriginal(original, thisObj, args);
           },
         );
         patched += 1;
@@ -725,8 +629,6 @@ module.exports = class AntiIdle {
     }
 
     if (this._patchDiscordHttp()) patched += 1;
-    if (this._patchInteractionFunctions()) patched += 1;
-    if (this._patchXHR()) patched += 1;
 
     this._clientLogPatched = patched > 0;
     if (!this._clientLogPatched) {
