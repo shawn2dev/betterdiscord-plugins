@@ -2,7 +2,7 @@
  * @name ShawnyHelper
  * @author Shawny
  * @description Reduces AFK voice channel moves caused by Discord idle/AFK handling and helpers for shawnybot.
- * @version 1.7.6
+ * @version 1.7.7
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/ShawnyHelper.plugin.js
  */
@@ -50,7 +50,7 @@ module.exports = class ShawnyHelper {
     return 'AFK 방지 및 shawnybot helper 기능.';
   }
   getVersion() {
-    return '1.7.6';
+    return '1.7.7';
   }
   getAuthor() {
     return 'Shawny';
