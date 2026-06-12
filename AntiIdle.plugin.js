@@ -2,7 +2,7 @@
  * @name AntiIdle
  * @author Shawny
  * @description Reduces AFK voice channel moves caused by Discord idle/AFK handling.
- * @version 1.6.1
+ * @version 1.6.2
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/AntiIdle.plugin.js
  */
@@ -42,7 +42,7 @@ module.exports = class AntiIdle {
     return 'Discord 잠수(idle) 상태 및 AFK(비활성) 처리로 인한 AFK 음성 채널 이동을 줄입니다.';
   }
   getVersion() {
-    return '1.6.1';
+    return '1.6.2';
   }
   getAuthor() {
     return 'Shawny';
@@ -454,8 +454,16 @@ module.exports = class AntiIdle {
     await this._sendClientHeaders(details, interactionBody);
   }
 
-  _callOriginal(original, thisObj, args) {
-    return Reflect.apply(original, thisObj, args);
+  _scheduleInteractionLogFromFetch(input, init) {
+    void this._maybeLogInteractionHeaders(input, init).catch((err) => {
+      console.warn('[AntiIdle] client header log failed:', err);
+    });
+  }
+
+  _scheduleInteractionLogFromHttp(args, methodName) {
+    void this._maybeLogFromHttpArgs(args, methodName).catch((err) => {
+      console.warn('[AntiIdle] client header log failed:', err);
+    });
   }
 
   async _getFetchUrl(input, init = {}) {
@@ -489,24 +497,6 @@ module.exports = class AntiIdle {
     } catch (_) {
       return false;
     }
-  }
-
-  _collectFetchPatchTargets() {
-    const targets = [];
-    const seen = new Set();
-
-    const add = (obj, key) => {
-      if (!obj || seen.has(obj) || !this._canPatchProperty(obj, key)) return;
-      seen.add(obj);
-      targets.push({ obj, key });
-    };
-
-    add(window, 'fetch');
-    if (globalThis.fetch && globalThis.fetch !== window.fetch) {
-      add(globalThis, 'fetch');
-    }
-
-    return targets;
   }
 
   _readHttpBody(body) {
@@ -555,8 +545,17 @@ module.exports = class AntiIdle {
 
   async _maybeLogFromHttpArgs(args, methodName) {
     if (!this._isClientLogActive() || !args?.length) return;
+
+    const first = args[0];
+    let url = '';
+    if (first && typeof first === 'object' && !(first instanceof URL)) {
+      url = String(first.url || first.path || first.endpoint || '');
+    } else {
+      url = String(first ?? '');
+    }
+    if (!this._isInteractionsUrl(url)) return;
+
     const details = this._extractHttpDetails(args, methodName);
-    if (!this._isInteractionsUrl(details.url)) return;
     await this._logInteractionDetails(details);
   }
 
@@ -581,21 +580,10 @@ module.exports = class AntiIdle {
     if (!http || !this._canPatchProperty(http, 'post')) return false;
 
     try {
-      BdApi.Patcher.instead(
-        'AntiIdleClientLog',
-        http,
-        'post',
-        async (thisObj, args, original) => {
-          if (this._isClientLogActive()) {
-            try {
-              await this._maybeLogFromHttpArgs(args, 'post');
-            } catch (err) {
-              console.warn('[AntiIdle] client header log failed:', err);
-            }
-          }
-          return this._callOriginal(original, thisObj, args);
-        },
-      );
+      BdApi.Patcher.before('AntiIdleClientLog', http, 'post', (_, args) => {
+        if (!this._isClientLogActive()) return;
+        this._scheduleInteractionLogFromHttp(args, 'post');
+      });
       return true;
     } catch (_) {
       return false;
@@ -607,23 +595,12 @@ module.exports = class AntiIdle {
 
     let patched = 0;
 
-    for (const { obj, key } of this._collectFetchPatchTargets()) {
+    if (this._canPatchProperty(window, 'fetch')) {
       try {
-        BdApi.Patcher.instead(
-          'AntiIdleClientLog',
-          obj,
-          key,
-          async (thisObj, args, original) => {
-            if (this._isClientLogActive()) {
-              try {
-                await this._maybeLogInteractionHeaders(args[0], args[1]);
-              } catch (err) {
-                console.warn('[AntiIdle] client header log failed:', err);
-              }
-            }
-            return this._callOriginal(original, thisObj, args);
-          },
-        );
+        BdApi.Patcher.before('AntiIdleClientLog', window, 'fetch', (_, args) => {
+          if (!this._isClientLogActive()) return;
+          this._scheduleInteractionLogFromFetch(args[0], args[1]);
+        });
         patched += 1;
       } catch (_) {}
     }
