@@ -47,7 +47,7 @@ module.exports = class ShawnyHelper {
     return 'ShawnyHelper';
   }
   getDescription() {
-    return 'Discord 잠수(idle) 상태 및 AFK(비활성) 처리로 인한 AFK 음성 채널 이동을 줄입니다.';
+    return 'AFK 방지 및 shawnybot helper 기능.';
   }
   getVersion() {
     return '1.7.5';
