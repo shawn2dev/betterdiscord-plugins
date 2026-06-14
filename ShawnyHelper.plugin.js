@@ -43,6 +43,15 @@ module.exports = class ShawnyHelper {
     this.useAudioKeepalive = true;
     this._clientLogConfig = { ..._CLIENT_LOG };
     this._autoUpdateInterval = null;
+    // AFK toggle state + settings
+    this.afkActive = false;
+    this.afkSettings = {
+      prefix: '[자리비움] ',
+      status: 'idle', // 'online'|'idle'|'dnd'|'invisible'
+      muteOnAfk: true,
+    };
+    this._afkObserver = null;
+    this._afkButton = null;
   }
 
   getName() {
@@ -693,6 +702,242 @@ module.exports = class ShawnyHelper {
     this._clientLogHookCount = 0;
   }
 
+  // ---------------- AFK 버튼 및 동작 ----------------
+  _ensureAfkButtonObserver() {
+    if (this._afkObserver) return;
+    const attach = () => {
+      try {
+        const container = this._findSettingsButtonContainer();
+        if (container && !this._afkButton) {
+          this._afkButton = this._createAfkButtonElement();
+          container.insertBefore(this._afkButton, container.querySelector('[aria-label*="사용자 설정"],[aria-label*="User Settings"]'));
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    attach();
+    this._afkObserver = new MutationObserver(() => attach());
+    this._afkObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
+  _findSettingsButtonContainer() {
+    // try find the toolbar that contains the gear (user settings) button
+    const gear = document.querySelector('[aria-label*="사용자 설정"],[aria-label*="User Settings"]');
+    if (gear && gear.parentElement) return gear.parentElement;
+    // fallback: look for known buttons container class
+    const byClass = document.querySelector('div[class*="buttons_"]');
+    if (byClass) return byClass;
+    return null;
+  }
+
+  _createAfkButtonElement() {
+    const btn = document.createElement('button');
+    btn.className = 'shawnyhelper-afk-button';
+    btn.type = 'button';
+    btn.style.cssText = 'background:transparent;border:none;padding:6px;border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;';
+    btn.title = '자리비움 토글';
+    btn.innerHTML = `
+      <svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 64 64" width="20" height="20" style="display:block;">
+        <path d="M0 0 C3.5 0.125 3.5 0.125 4.5 1.125 C4.54092937 3.45797433 4.54241723 5.79205225 4.5 8.125 C2.85 8.785 1.2 9.445 -0.5 10.125 C4.2918964 14.54593655 4.2918964 14.54593655 10.5 16.125 C10.5 18.105 10.5 20.085 10.5 22.125 C8.87509046 22.15198189 7.25005367 22.17138757 5.625 22.1875 C4.26761719 22.20490234 4.26761719 22.20490234 2.8828125 22.22265625 C0.5 22.125 0.5 22.125 -1.5 21.125 C-2.28783103 22.87523563 -2.28783103 22.87523563 -2.5 25.125 C-1.30679615 27.61210722 -1.30679615 27.61210722 0.4375 30.0625 C2.87107669 33.6491153 3.88271329 35.75894426 3.5 40.125 C1.23828125 40.40625 1.23828125 40.40625 -1.5 40.125 C-3.51953125 38.15625 -3.51953125 38.15625 -5.3125 35.625 C-5.91707031 34.7896875 -6.52164062 33.954375 -7.14453125 33.09375 C-7.59183594 32.4440625 -8.03914063 31.794375 -8.5 31.125 C-9.16 31.785 -9.82 32.445 -10.5 33.125 C-13.3203125 33.3203125 -13.3203125 33.3203125 -16.625 33.25 C-17.72070312 33.23195312 -18.81640625 33.21390625 -19.9453125 33.1953125 C-20.78835937 33.17210937 -21.63140625 33.14890625 -22.5 33.125 C-22.5 31.145 -22.5 29.165 -22.5 27.125 C-20.19 27.125 -17.88 27.125 -15.5 27.125 C-14.84 25.145 -14.18 23.165 -13.5 21.125 C-15.15 20.795 -16.8 20.465 -18.5 20.125 C-18.7225617 16.93494902 -18.57725042 14.3924053 -17.6875 11.3125 C-14.07618738 7.70118738 -9.41505482 8.2167922 -4.5 8.125 C-4.5309375 6.4234375 -4.5309375 6.4234375 -4.5625 4.6875 C-4.4830721 0.16010972 -4.4830721 0.16010972 0 0 Z M-1.5 3.125 C-1.5 4.115 -1.5 5.105 -1.5 6.125 C-0.51 6.125 0.48 6.125 1.5 6.125 C1.5 5.135 1.5 4.145 1.5 3.125 C0.51 3.125 -0.48 3.125 -1.5 3.125 Z M-12.5 11.125 C-12.5 12.115 -12.5 13.105 -12.5 14.125 C-10.52 13.795 -8.54 13.465 -6.5 13.125 C-6.995 14.176875 -7.49 15.22875 -8 16.3125 C-9.29865345 19.38825818 -10.15517742 21.75551612 -9.5 25.125 C-7.5995533 26.96815671 -7.5995533 26.96815671 -5.5 28.125 C-5.5928125 26.825625 -5.5928125 26.825625 -5.6875 25.5 C-5.42459342 20.76768147 -3.84530013 17.47030013 -0.5 14.125 C-4.72949995 11.70814288 -7.62335991 10.77666856 -12.5 11.125 Z M-15.5 15.125 C-14.5 17.125 -14.5 17.125 -14.5 17.125 Z M2.5 18.125 C2.83 18.785 3.16 19.445 3.5 20.125 C4.82 20.125 6.14 20.125 7.5 20.125 C7.5 19.465 7.5 18.805 7.5 18.125 C5.85 18.125 4.2 18.125 2.5 18.125 Z M-12.5 27.125 C-11.5 29.125 -11.5 29.125 -11.5 29.125 Z M-5.5 28.125 C-4.5 30.125 -4.5 30.125 -4.5 30.125 Z M-19.5 29.125 C-19.5 29.785 -19.5 30.445 -19.5 31.125 C-17.52 31.125 -15.54 31.125 -13.5 31.125 C-13.17 30.465 -12.84 29.805 -12.5 29.125 C-14.81 29.125 -17.12 29.125 -19.5 29.125 Z " fill="currentColor" transform="translate(25.5,6.875)"/>
+        <path d="M0 0 C8.58 0 17.16 0 26 0 C26 14.52 26 29.04 26 44 C20.72 44 15.44 44 10 44 C10 43.34 10 42.68 10 42 C14.62 42 19.24 42 24 42 C24 28.8 24 15.6 24 2 C16.08 2 8.16 2 0 2 C0 1.34 0 0.68 0 0 Z " fill="currentColor" transform="translate(21,3)"/>
+        <path d="M0 0 C2.86724686 0.57344937 3.8614515 0.8614515 6 3 C5.67028521 6.29714793 5.3773161 7.6226839 3 10 C2.01 10 1.02 10 0 10 C0 9.01 0 8.02 0 7 C-1.65 6.67 -3.3 6.34 -5 6 C-5 5.34 -5 4.68 -5 4 C-3.35 3.67 -1.7 3.34 0 3 C0 2.01 0 1.02 0 0 Z " fill="currentColor" transform="translate(37,11)"/>
+      </svg>
+    `;
+
+    const setActiveStyle = (active) => {
+      if (active) {
+        btn.style.color = 'var(--interactive-danger, #ED4245)';
+        btn.setAttribute('aria-pressed', 'true');
+      } else {
+        btn.style.color = 'var(--text-normal)';
+        btn.removeAttribute('aria-pressed');
+      }
+    };
+
+    setActiveStyle(this.afkActive);
+
+    btn.addEventListener('click', async () => {
+      await this._toggleAfk();
+      setActiveStyle(this.afkActive);
+    });
+
+    return btn;
+  }
+
+  async _toggleAfk() {
+    this.afkActive = !this.afkActive;
+    this._save();
+    if (this.afkActive) {
+      await this._applyAfkOn();
+      this._toast('자리비움 모드 시작됨', { type: 'info' });
+    } else {
+      await this._applyAfkOff();
+      this._toast('자리비움 모드 종료됨', { type: 'info' });
+    }
+  }
+
+  async _applyAfkOn() {
+    try {
+      // set presence/status
+      await this._setPresence(this.afkSettings.status || 'idle');
+      // mute if configured
+      if (this.afkSettings.muteOnAfk) await this._setLocalMute(true);
+      // prefix nickname in current guild if possible
+      try {
+        const guildEl = document.querySelector('[data-list-item-id^="guildsnav__"]');
+        const guildId = (guildEl && guildEl.getAttribute && guildEl.getAttribute('data-list-item-id')) || null;
+        // best-effort: try to detect current guild from DOM
+        // guildId format may vary; skip if not found
+        if (guildId && typeof guildId === 'string') {
+          // extract numeric/ID part
+          const id = guildId.split(':').pop();
+          await this._setNicknamePrefix(id, this.afkSettings.prefix || '[자리비움] ');
+        }
+      } catch (_) {}
+    } catch (e) {
+      console.warn('[ShawnyHelper] _applyAfkOn 실패:', e);
+    }
+  }
+
+  async _applyAfkOff() {
+    try {
+      await this._setPresence('online');
+      if (this.afkSettings.muteOnAfk) await this._setLocalMute(false);
+      // try restoring nickname for current guild similar to _applyAfkOn
+      try {
+        const guildEl = document.querySelector('[data-list-item-id^="guildsnav__"]');
+        const guildId = (guildEl && guildEl.getAttribute && guildEl.getAttribute('data-list-item-id')) || null;
+        if (guildId && typeof guildId === 'string') {
+          const id = guildId.split(':').pop();
+          await this._restoreNickname(id);
+        }
+      } catch (_) {}
+    } catch (e) {
+      console.warn('[ShawnyHelper] _applyAfkOff 실패:', e);
+    }
+  }
+
+  async _setPresence(status) {
+    try {
+      // try multiple candidate modules
+      const candidates = [
+        BdApi.Webpack.getModule(m => m && typeof m.setStatus === 'function'),
+        BdApi.Webpack.getModule(m => m && typeof m.updateStatus === 'function'),
+      ];
+      for (const mod of candidates) {
+        if (!mod) continue;
+        if (typeof mod.setStatus === 'function') {
+          mod.setStatus(status);
+          return true;
+        }
+        if (typeof mod.updateStatus === 'function') {
+          mod.updateStatus(status);
+          return true;
+        }
+      }
+    } catch (e) {
+      console.warn('[ShawnyHelper] setPresence 오류:', e);
+    }
+    return false;
+  }
+
+  async _setLocalMute(mute) {
+    try {
+      const VoiceActions = BdApi.Webpack.getModule(m => m && (m.setSelfMute || m.setLocalMute || m.mute));
+      if (VoiceActions) {
+        if (typeof VoiceActions.setSelfMute === 'function') {
+          VoiceActions.setSelfMute(mute);
+          return true;
+        }
+        if (typeof VoiceActions.setLocalMute === 'function') {
+          VoiceActions.setLocalMute(mute);
+          return true;
+        }
+        if (typeof VoiceActions.mute === 'function') {
+          VoiceActions.mute(mute);
+          return true;
+        }
+      }
+    } catch (e) {
+      console.warn('[ShawnyHelper] setLocalMute 오류:', e);
+    }
+    return false;
+  }
+
+  async _setNicknamePrefix(guildId, prefix) {
+    try {
+      if (!guildId) return false;
+      const User = BdApi.Webpack.getModule(m => m && typeof m.getCurrentUser === 'function');
+      const me = User?.getCurrentUser?.();
+      const userId = me?.id;
+      if (!userId) return false;
+
+      const GuildMemberActions = BdApi.Webpack.getModule(m => m && (typeof m.editGuildMember === 'function' || typeof m.editMember === 'function'));
+      if (GuildMemberActions) {
+        const store = BdApi.Webpack.getModule(m => m && typeof m.getMember === 'function');
+        let currentNick = null;
+        try {
+          const member = store?.getMember?.(guildId, userId) || store?.getMember?.(guildId + '','' + userId) || null;
+          currentNick = member?.nick || null;
+        } catch (_) {}
+        // save original
+        if (!this._originalNicknames) this._originalNicknames = new Map();
+        if (!this._originalNicknames.has(guildId)) this._originalNicknames.set(guildId, currentNick);
+
+        const newNick = `${prefix}${currentNick ?? ''}`.trim();
+        try {
+          if (typeof GuildMemberActions.editGuildMember === 'function') {
+            await GuildMemberActions.editGuildMember(guildId, userId, { nick: newNick });
+            return true;
+          }
+          if (typeof GuildMemberActions.editMember === 'function') {
+            await GuildMemberActions.editMember(guildId, userId, { nick: newNick });
+            return true;
+          }
+        } catch (e) {
+          console.warn('[ShawnyHelper] editGuildMember 실패:', e);
+        }
+      }
+    } catch (e) {
+      console.warn('[ShawnyHelper] _setNicknamePrefix 오류:', e);
+    }
+    return false;
+  }
+
+  async _restoreNickname(guildId) {
+    try {
+      if (!guildId || !this._originalNicknames) return false;
+      const orig = this._originalNicknames.get(guildId);
+      if (orig === undefined) return false;
+      const User = BdApi.Webpack.getModule(m => m && typeof m.getCurrentUser === 'function');
+      const me = User?.getCurrentUser?.();
+      const userId = me?.id;
+      if (!userId) return false;
+      const GuildMemberActions = BdApi.Webpack.getModule(m => m && (typeof m.editGuildMember === 'function' || typeof m.editMember === 'function'));
+      if (GuildMemberActions) {
+        try {
+          if (typeof GuildMemberActions.editGuildMember === 'function') {
+            await GuildMemberActions.editGuildMember(guildId, userId, { nick: orig });
+            this._originalNicknames.delete(guildId);
+            return true;
+          }
+          if (typeof GuildMemberActions.editMember === 'function') {
+            await GuildMemberActions.editMember(guildId, userId, { nick: orig });
+            this._originalNicknames.delete(guildId);
+            return true;
+          }
+        } catch (e) {
+          console.warn('[ShawnyHelper] restoreNickname 실패:', e);
+        }
+      }
+    } catch (e) {
+      console.warn('[ShawnyHelper] _restoreNickname 오류:', e);
+    }
+    return false;
+  }
+
   _parseVersion(version) {
     return String(version)
       .split('.')
@@ -1019,6 +1264,8 @@ module.exports = class ShawnyHelper {
         intervalSecs: this.intervalSecs,
         enabled: this.enabled,
         useAudioKeepalive: this.useAudioKeepalive,
+        afkSettings: this.afkSettings,
+        afkActive: this.afkActive,
       });
     } catch (_) {}
   }
@@ -1045,6 +1292,23 @@ module.exports = class ShawnyHelper {
 
     this.Dispatcher = this._findDispatcher();
     this._syncClientLogPatch();
+
+    // load afk settings
+    try {
+      const savedAfk = BdApi.loadData('ShawnyHelper', 'settings');
+      if (savedAfk) {
+        this.afkSettings = savedAfk.afkSettings ?? this.afkSettings;
+        this.afkActive = !!savedAfk.afkActive;
+      }
+    } catch (_) {}
+
+    // inject AFK button into the UI
+    try {
+      this._ensureAfkButtonObserver();
+      if (this.afkActive) this._applyAfkOn();
+    } catch (e) {
+      console.warn('[ShawnyHelper] AFK 버튼 초기화 실패:', e);
+    }
 
     if (this.enabled) {
       if (!this._installDispatchPatch()) {
@@ -1083,6 +1347,17 @@ module.exports = class ShawnyHelper {
     this._stopDispatchPatch();
     this._stopClientLogPatch();
     this.Dispatcher = null;
+    // cleanup afk UI observer/button
+    try {
+      if (this._afkObserver) {
+        this._afkObserver.disconnect();
+        this._afkObserver = null;
+      }
+      if (this._afkButton && this._afkButton.parentElement) {
+        this._afkButton.parentElement.removeChild(this._afkButton);
+        this._afkButton = null;
+      }
+    } catch (_) {}
     this._toast('ShawnyHelper 중지됨', { type: 'info' });
   }
 
@@ -1209,6 +1484,60 @@ module.exports = class ShawnyHelper {
         'border:none;border-top:1px solid var(--background-modifier-accent);margin:0;',
     });
 
+    // AFK 설정 영역
+    const afkWrap = Object.create(null);
+    afkWrap.container = Object.assign(document.createElement('div'), {
+      style: 'display:flex;flex-direction:column;gap:8px;padding:8px 0;'
+    });
+
+    const afkTitle = Object.create(null);
+    afkTitle.el = document.createElement('div');
+    afkTitle.el.innerHTML = `
+      <div style="font-size:14px;font-weight:600;color:var(--header-primary);">자리비움 버튼</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">툴바의 톱니 바로 앞에 버튼을 추가합니다. 프리픽스·상태·마이크 동작을 설정하세요.</div>
+    `;
+
+    const prefixRow = document.createElement('div');
+    prefixRow.style = 'display:flex;align-items:center;gap:8px;';
+    const prefixLabel = document.createElement('div');
+    prefixLabel.style = 'min-width:120px;font-size:13px;color:var(--text-normal);';
+    prefixLabel.textContent = '닉네임 프리픽스';
+    const prefixInput = document.createElement('input');
+    prefixInput.type = 'text';
+    prefixInput.value = this.afkSettings.prefix || '[자리비움] ';
+    prefixInput.style = 'flex:1;padding:6px;border-radius:6px;border:1px solid var(--background-modifier-accent);background:var(--background-primary);color:var(--text-normal);';
+    prefixInput.addEventListener('change', () => {
+      this.afkSettings.prefix = prefixInput.value;
+      this._save();
+    });
+    prefixRow.append(prefixLabel, prefixInput);
+
+    const statusRow = document.createElement('div');
+    statusRow.style = 'display:flex;align-items:center;gap:8px;';
+    const statusLabel = document.createElement('div');
+    statusLabel.style = 'min-width:120px;font-size:13px;color:var(--text-normal);';
+    statusLabel.textContent = '설정할 상태';
+    const statusSelect = document.createElement('select');
+    ['online','idle','dnd','invisible'].forEach(s => {
+      const o = document.createElement('option'); o.value = s; o.textContent = s; statusSelect.append(o);
+    });
+    statusSelect.value = this.afkSettings.status || 'idle';
+    statusSelect.style = 'flex:1;padding:6px;border-radius:6px;border:1px solid var(--background-modifier-accent);background:var(--background-primary);color:var(--text-normal);';
+    statusSelect.addEventListener('change', () => { this.afkSettings.status = statusSelect.value; this._save(); });
+    statusRow.append(statusLabel, statusSelect);
+
+    const muteRow = document.createElement('div');
+    muteRow.style = 'display:flex;align-items:center;justify-content:space-between;';
+    const muteLabel = document.createElement('div');
+    muteLabel.innerHTML = `
+      <div style="font-size:14px;font-weight:600;color:var(--header-primary);">AFK 시 마이크 음소거</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">자리비움 시작 시 마이크를 무음 처리합니다.</div>
+    `;
+    const muteToggle = this._buildToggle(!!this.afkSettings.muteOnAfk, (v) => { this.afkSettings.muteOnAfk = v; this._save(); });
+    muteRow.append(muteLabel, muteToggle);
+
+    afkWrap.container.append(afkTitle.el, prefixRow, statusRow, muteRow);
+
     const updateRow = Object.assign(document.createElement('div'), {
       style: 'display:flex;align-items:center;justify-content:space-between;gap:12px;',
     });
@@ -1226,7 +1555,7 @@ module.exports = class ShawnyHelper {
     updateBtn.addEventListener('click', () => this._checkForUpdatesNow());
     updateRow.append(updateLabel, updateBtn);
 
-    root.append(row, hr, audioRow, sliderWrap, status, dispStatus, updateRow, note);
+    root.append(row, hr, afkWrap.container, audioRow, sliderWrap, status, dispStatus, updateRow, note);
     return root;
   }
 
