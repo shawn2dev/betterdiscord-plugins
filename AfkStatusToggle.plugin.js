@@ -1,7 +1,7 @@
 /**
  * @name AfkStatusToggle
- * @author GitHub Copilot
- * @version 0.0.1
+ * @author Shawny
+ * @version 1.0.1
  * @description 자리비움 토글 버튼을 사용자 설정 톱니 바로 앞에 추가합니다. 닉네임 프리픽스, 상태, 마이크 음소거를 설정할 수 있습니다. 자동 업데이트 지원.
  * @source https://github.com/yourname/yourrepo
  * @updateUrl https://raw.githubusercontent.com/yourname/yourrepo/main/AfkStatusToggle.plugin.js
@@ -33,11 +33,11 @@ module.exports = class AfkStatusToggle {
   }
 
   getAuthor() {
-    return 'GitHub Copilot';
+    return 'Shawny';
   }
 
   getVersion() {
-    return '0.0.1';
+    return '1.0.1';
   }
 
   getDescription() {
