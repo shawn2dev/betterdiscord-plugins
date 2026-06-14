@@ -2,7 +2,7 @@
  * @name ShawnyHelper
  * @author Shawny
  * @description Prevent AFK voice channel moves caused by Discord idle/AFK handling and helpers for shawnybot.
- * @version 1.8.1
+ * @version 1.8.11
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/ShawnyHelper.plugin.js
  */
@@ -52,7 +52,7 @@ module.exports = class ShawnyHelper {
     return 'AFK 방지 및 shawnybot helper 기능.';
   }
   getVersion() {
-    return '1.8.1';
+    return '1.8.11';
   }
   getAuthor() {
     return 'Shawny';
@@ -654,19 +654,13 @@ module.exports = class ShawnyHelper {
     this._clientLogHookCount = hooks;
     this._clientLogPatched = hooks > 0;
 
-    if (this._clientLogPatched) {
-      console.info('[ShawnyHelper] client log hooks installed:', hooks);
-    } else {
-      console.warn('[ShawnyHelper] client log: no hooks installed');
-    }
-
     return this._clientLogPatched;
   }
 
   _scheduleClientLogPatchRetry() {
     if (this._clientLogPatched || this._clientLogRetryTimer) return;
     let attempts = 0;
-    const max = 25;
+    const max = 3;
     this._clientLogRetryTimer = setInterval(() => {
       if (!this._isClientLogActive()) {
         clearInterval(this._clientLogRetryTimer);
