@@ -14,7 +14,6 @@ const DEFAULT_PLUGIN_SETTINGS = {
   prefix: '[자리비움] ',
   status: 'idle',
   muteOnAfk: true,
-  autoUpdate: true,
   afkActive: false,
 };
 
@@ -113,27 +112,14 @@ module.exports = class AfkStatusToggle {
     muteRow.appendChild(muteToggle);
     muteSection.appendChild(muteRow);
 
-    const updateSection = makeSection('자동 업데이트', '플러그인의 @updateUrl 메타데이터를 사용하여 새 버전을 확인합니다.');
-    const autoUpdateRow = document.createElement('div');
-    autoUpdateRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;';
-    const autoUpdateText = document.createElement('div');
-    autoUpdateText.textContent = '자동 업데이트 활성화';
-    autoUpdateText.style.cssText = 'font-size:13px;color:var(--text-normal);';
-    const autoUpdateToggle = this._createToggle(this._settings.autoUpdate, (value) => {
-      this._settings.autoUpdate = value;
-      this._saveSettings();
-      this._restartAutoUpdateTimer();
-    });
-    autoUpdateRow.appendChild(autoUpdateText);
-    autoUpdateRow.appendChild(autoUpdateToggle);
+    const updateSection = makeSection('자동 업데이트', '플러그인의 @updateUrl 메타데이터를 사용하여 새 버전을 확인합니다. 자동 업데이트는 항상 활성화되어 있습니다.');
     const checkNowButton = document.createElement('button');
     checkNowButton.textContent = '지금 업데이트 확인';
     checkNowButton.style.cssText = 'padding:8px 12px;border-radius:8px;border:none;background:#5865f2;color:#ffffff;font-weight:600;cursor:pointer;';
     checkNowButton.addEventListener('click', () => this._checkForUpdates(true));
     const urlHint = document.createElement('div');
-    urlHint.textContent = '@updateUrl 에 설정된 플러그인 URL을 사용합니다.';
+    urlHint.textContent = '@updateUrl에 설정된 플러그인 URL을 사용합니다.';
     urlHint.style.cssText = 'font-size:12px;color:var(--text-muted);';
-    updateSection.appendChild(autoUpdateRow);
     updateSection.appendChild(checkNowButton);
     updateSection.appendChild(urlHint);
 
@@ -382,7 +368,6 @@ module.exports = class AfkStatusToggle {
 
   _startAutoUpdateTimer() {
     this._stopAutoUpdateTimer();
-    if (!this._settings.autoUpdate) return;
     const updateUrl = this._getUpdateUrl();
     if (!updateUrl) return;
     this._autoUpdateInterval = setInterval(() => this._checkForUpdates(false), AUTO_UPDATE_CHECK_INTERVAL_MS);
