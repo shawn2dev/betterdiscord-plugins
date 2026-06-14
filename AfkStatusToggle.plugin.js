@@ -1,8 +1,8 @@
-/**
+﻿/**
  * @name AfkStatusToggle
  * @author Shawny
- * @version 1.0.5
- * @description 자리비움 토글 버튼을 사용자 설정 톱니 바로 앞에 추가합니다. 닉네임 프리픽스, 상태, 마이크 음소거를 설정할 수 있습니다. 자동 업데이트 지원.
+ * @version 1.0.6
+ * @description AFK status toggle with nickname prefix, presence status, and optional mic mute.
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/AfkStatusToggle.plugin.js
  */
@@ -11,7 +11,7 @@
 
 const AUTO_UPDATE_CHECK_INTERVAL_MS = 1000 * 60 * 60;
 const DEFAULT_PLUGIN_SETTINGS = {
-  prefix: '[자리비움] ',
+  prefix: '[AFK] ',
   status: 'idle',
   muteOnAfk: true,
   afkActive: false,
@@ -39,7 +39,7 @@ module.exports = class AfkStatusToggle {
   }
 
   getDescription() {
-    return '자리비움 토글 버튼을 사용자 설정 버튼 앞에 추가하고, 닉네임 프리픽스, 상태, 마이크 음소거 설정을 적용합니다.';
+    return 'AFK status toggle with nickname prefix, presence status, and optional mic mute.';
   }
 
   start() {
@@ -71,7 +71,7 @@ module.exports = class AfkStatusToggle {
       return section;
     };
 
-    const prefixSection = makeSection('프리픽스', '활성화 시 닉네임 앞에 붙일 텍스트입니다.');
+    const prefixSection = makeSection('Nickname Prefix', 'Set the prefix that will be applied to your nickname when AFK mode is enabled.');
     const prefixInput = document.createElement('input');
     prefixInput.type = 'text';
     prefixInput.value = this._settings.prefix;
@@ -82,7 +82,7 @@ module.exports = class AfkStatusToggle {
     });
     prefixSection.appendChild(prefixInput);
 
-    const statusSection = makeSection('상태', '자리비움 버튼을 눌렀을 때 적용할 접속 상태를 선택합니다.');
+    const statusSection = makeSection('Status', 'Choose the presence status that will be applied when AFK mode is enabled.');
     const statusSelect = document.createElement('select');
     ['online', 'idle', 'dnd', 'invisible'].forEach((status) => {
       const option = document.createElement('option');
@@ -98,11 +98,11 @@ module.exports = class AfkStatusToggle {
     });
     statusSection.appendChild(statusSelect);
 
-    const muteSection = makeSection('마이크 음소거', '자리비움 모드에서 마이크를 자동으로 음소거할지 여부를 설정합니다.');
+    const muteSection = makeSection('Mute on AFK', 'Mute your microphone automatically while AFK mode is enabled.');
     const muteRow = document.createElement('div');
     muteRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;';
     const muteText = document.createElement('div');
-    muteText.textContent = 'AFK 시 마이크 음소거';
+    muteText.textContent = 'Mute microphone';
     muteText.style.cssText = 'font-size:13px;color:var(--text-normal);';
     const muteToggle = this._createToggle(this._settings.muteOnAfk, (value) => {
       this._settings.muteOnAfk = value;
@@ -112,17 +112,15 @@ module.exports = class AfkStatusToggle {
     muteRow.appendChild(muteToggle);
     muteSection.appendChild(muteRow);
 
-    const updateSection = makeSection('업데이트', '');
     const checkNowButton = document.createElement('button');
     checkNowButton.textContent = '업데이트 확인';
     checkNowButton.style.cssText = 'padding:8px 12px;border-radius:8px;border:none;background:#5865f2;color:#ffffff;font-weight:600;cursor:pointer;margin:0 auto;display:block;';
     checkNowButton.addEventListener('click', () => this._checkForUpdates(true));
-    updateSection.appendChild(checkNowButton);
 
     root.appendChild(prefixSection);
     root.appendChild(statusSection);
     root.appendChild(muteSection);
-    root.appendChild(updateSection);
+    root.appendChild(checkNowButton);
 
     return root;
   }
@@ -167,13 +165,34 @@ module.exports = class AfkStatusToggle {
     } catch (_) {}
   }
 
+  _debugLog(message, data) {
+    try {
+      console.log('[AfkStatusToggle]', message, data || '');
+    } catch (_) {}
+  }
+
+  _unwrapModule(mod) {
+    if (!mod) return null;
+    if (Array.isArray(mod)) {
+      for (const item of mod) {
+        const result = this._unwrapModule(item);
+        if (result) return result;
+      }
+      return null;
+    }
+    if (mod.default && typeof mod.default === 'object') {
+      return this._unwrapModule(mod.default);
+    }
+    return mod;
+  }
+
   _findModuleWithProps(...props) {
     try {
       if (typeof BdApi.findModuleByProps === 'function') {
-        const mod = BdApi.findModuleByProps(...props);
+        const mod = this._unwrapModule(BdApi.findModuleByProps(...props));
         if (mod) return mod;
       }
-      return BdApi.Webpack.getModule((m) => m && props.every((p) => p in m));
+      return this._unwrapModule(BdApi.Webpack.getModule((m) => m && props.every((p) => p in m)));
     } catch (_) {
       return null;
     }
@@ -182,10 +201,10 @@ module.exports = class AfkStatusToggle {
   _findModule(predicate) {
     try {
       if (typeof BdApi.findModule === 'function') {
-        const mod = BdApi.findModule(predicate);
+        const mod = this._unwrapModule(BdApi.findModule(predicate));
         if (mod) return mod;
       }
-      return BdApi.Webpack.getModule(predicate);
+      return this._unwrapModule(BdApi.Webpack.getModule(predicate));
     } catch (_) {
       return null;
     }
@@ -194,7 +213,7 @@ module.exports = class AfkStatusToggle {
   _ensureAfkButton() {
     if (this._button) return;
     const attach = () => {
-      const gear = document.querySelector('[aria-label*="사용자 설정"],[aria-label*="User Settings"]');
+      const gear = document.querySelector('[aria-label="User Settings"], [aria-label="사용자 설정"], [title="User Settings"], [title="사용자 설정"], [data-tooltip-content="User Settings"], [data-tooltip-content="사용자 설정"]');
       if (!gear || this._button) return;
       const container = gear.parentElement;
       if (!container) return;
@@ -226,27 +245,43 @@ module.exports = class AfkStatusToggle {
   _createAfkButton() {
     const button = document.createElement('button');
     button.type = 'button';
-    button.title = '자리비움 토글';
+    button.title = 'Toggle AFK';
     button.style.cssText = 'background:transparent;border:none;padding:0;margin-right:4px;width:32px;height:32px;border-radius:8px;cursor:pointer;color:var(--text-normal);display:flex;align-items:center;justify-content:center;align-self:center;line-height:0;';
-    button.innerHTML = `
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="20" height="20" fill="currentColor" style="display:block;margin:auto;">
-        <path d="M0 0 C3.5 0.125 3.5 0.125 4.5 1.125 C4.54092937 3.45797433 4.54241723 5.79205225 4.5 8.125 C2.85 8.785 1.2 9.445 -0.5 10.125 C4.2918964 14.54593655 4.2918964 14.54593655 10.5 16.125 C10.5 18.105 10.5 20.085 10.5 22.125 C8.87509046 22.15198189 7.25005367 22.17138757 5.625 22.1875 C4.26761719 22.20490234 4.26761719 22.20490234 2.8828125 22.22265625 C0.5 22.125 0.5 22.125 -1.5 21.125 C-2.28783103 22.87523563 -2.28783103 22.87523563 -2.5 25.125 C-1.30679615 27.61210722 -1.30679615 27.61210722 0.4375 30.0625 C2.87107669 33.6491153 3.88271329 35.75894426 3.5 40.125 C1.23828125 40.40625 1.23828125 40.40625 -1.5 40.125 C-3.51953125 38.15625 -3.51953125 38.15625 -5.3125 35.625 C-5.91707031 34.7896875 -6.52164062 33.954375 -7.14453125 33.09375 C-7.59183594 32.4440625 -8.03914063 31.794375 -8.5 31.125 C-9.16 31.785 -9.82 32.445 -10.5 33.125 C-13.3203125 33.3203125 -13.3203125 33.3203125 -16.625 33.25 C-17.72070312 33.23195312 -18.81640625 33.21390625 -19.9453125 33.1953125 C-20.78835937 33.17210937 -21.63140625 33.14890625 -22.5 33.125 C-22.5 31.145 -22.5 29.165 -22.5 27.125 C-20.19 27.125 -17.88 27.125 -15.5 27.125 C-14.84 25.145 -14.18 23.165 -13.5 21.125 C-15.15 20.795 -16.8 20.465 -18.5 20.125 C-18.7225617 16.93494902 -18.57725042 14.3924053 -17.6875 11.3125 C-14.07618738 7.70118738 -9.41505482 8.2167922 -4.5 8.125 C-4.5309375 6.4234375 -4.5309375 6.4234375 -4.5625 4.6875 C-4.4830721 0.16010972 -4.4830721 0.16010972 0 0 Z M-1.5 3.125 C-1.5 4.115 -1.5 5.105 -1.5 6.125 C-0.51 6.125 0.48 6.125 1.5 6.125 C1.5 5.135 1.5 4.145 1.5 3.125 C0.51 3.125 -0.48 3.125 -1.5 3.125 Z M-12.5 11.125 C-12.5 12.115 -12.5 13.105 -12.5 14.125 C-10.52 13.795 -8.54 13.465 -6.5 13.125 C-6.995 14.176875 -7.49 15.22875 -8 16.3125 C-9.29865345 19.38825818 -10.15517742 21.75551612 -9.5 25.125 C-7.5995533 26.96815671 -7.5995533 26.96815671 -5.5 28.125 C-5.5928125 26.825625 -5.5928125 26.825625 -5.6875 25.5 C-5.42459342 20.76768147 -3.84530013 17.47030013 -0.5 14.125 C-4.72949995 11.70814288 -7.62335991 10.77666856 -12.5 11.125 Z M-15.5 15.125 C-14.5 17.125 -14.5 17.125 -14.5 17.125 Z M2.5 18.125 C2.83 18.785 3.16 19.445 3.5 20.125 C4.82 20.125 6.14 20.125 7.5 20.125 C7.5 19.465 7.5 18.805 7.5 18.125 C5.85 18.125 4.2 18.125 2.5 18.125 Z M-12.5 27.125 C-11.5 29.125 -11.5 29.125 -11.5 29.125 Z M-5.5 28.125 C-4.5 30.125 -4.5 30.125 -4.5 30.125 Z M-19.5 29.125 C-19.5 29.785 -19.5 30.445 -19.5 31.125 C-17.52 31.125 -15.54 31.125 -13.5 31.125 C-13.17 30.465 -12.84 29.805 -12.5 29.125 C-14.81 29.125 -17.12 29.125 -19.5 29.125 Z" transform="translate(25.5,6.875)"/>
-        <path d="M0 0 C8.58 0 17.16 0 26 0 C26 14.52 26 29.04 26 44 C20.72 44 15.44 44 10 44 C10 43.34 10 42.68 10 42 C14.62 42 19.24 42 24 42 C24 28.8 24 15.6 24 2 C16.08 2 8.16 2 0 2 C0 1.34 0 0.68 0 0 Z" transform="translate(21,3)"/>
-        <path d="M0 0 C2.86724686 0.57344937 3.8614515 0.8614515 6 3 C5.67028521 6.29714793 5.3773161 7.6226839 3 10 C2.01 10 1.02 10 0 10 C0 9.01 0 8.02 0 7 C-1.65 6.67 -3.3 6.34 -5 6 C-5 5.34 -5 4.68 -5 4 C-3.35 3.67 -1.7 3.34 0 3 C0 2.01 0 1.02 0 0 Z" transform="translate(37,11)"/>
+        button.innerHTML = `
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512.149 512.149" width="20" height="20" fill="currentColor" style="display:block;margin:auto;">
+        <g transform="translate(-1)">
+          <g>
+            <g>
+              <path d="M504.427,111.44l-1.253-1.254c-11.776-11.776-30.967-11.802-42.814,0.035l-46.089,46.574     c-2.428,2.436-6.312,2.534-8.845,0.203l-64.618-59.657c-6.276-5.8-14.442-8.987-22.996-8.987h-96.124     c-2.269,0-4.44,0.865-6.082,2.419l-81.47,77.356c-11.935,11.944-12.756,31.197-1.818,42.92     c5.844,6.268,13.736,9.719,22.219,9.719h0.15c8.413-0.044,16.499-3.619,22.087-9.728l57.538-60.893h20.595L120.63,300.218H37.81     c-19.633,0-35.778,14.68-36.758,33.421c-0.521,9.79,2.904,19.094,9.64,26.191c6.638,7,15.969,11.008,25.618,11.008h123.586     c2.436,0,4.767-1.006,6.444-2.798l63.32-67.593l53.248,55.684l-16.075,102.735c-4.052,17.02,4.114,34.357,19.412,41.198     c4.714,2.119,9.719,3.178,14.698,3.178c5.358,0,10.69-1.227,15.598-3.655c9.481-4.696,16.296-13.285,18.776-23.967     l27.463-147.306c0.53-2.86-0.38-5.809-2.445-7.865l-73.295-73.198l58.227-58.138l40.589,40.58     c11.335,11.335,31.091,11.335,42.417,0l76.156-76.147c5.623-5.623,8.722-13.109,8.722-21.054     C513.149,124.54,510.05,117.063,504.427,111.44z"/>
+              <path d="M407.065,114.837c29.211,0,52.966-23.755,52.966-52.966c0-29.211-23.755-52.966-52.966-52.966     c-29.21,0-52.966,23.755-52.966,52.966C354.1,91.082,377.855,114.837,407.065,114.837z"/>
+            </g>
+          </g>
+        </g>
       </svg>
     `;
 
     this._updateButtonState(button, this._settings.afkActive);
     button.addEventListener('click', async () => {
+      this._debugLog('AFK button clicked', { active: this._settings.afkActive });
       this._settings.afkActive = !this._settings.afkActive;
       this._saveSettings();
       this._updateButtonState(button, this._settings.afkActive);
       if (this._settings.afkActive) {
-        await this._applyAfkOn();
-        this._toast('자리비움 모드가 활성화되었습니다.', { type: 'info' });
+        const result = await this._applyAfkOn();
+        this._debugLog('AFK on result', result);
+        if (result.success) {
+          this._toast('AFK mode enabled.', { type: 'info' });
+        } else {
+          this._toast(`AFK enable error: ${result.message}`, { type: 'error' });
+        }
       } else {
-        await this._applyAfkOff();
-        this._toast('자리비움 모드가 비활성화되었습니다.', { type: 'info' });
+        const result = await this._applyAfkOff();
+        this._debugLog('AFK off result', result);
+        if (result.success) {
+          this._toast('AFK mode disabled.', { type: 'info' });
+        } else {
+          this._toast(`AFK disable error: ${result.message}`, { type: 'error' });
+        }
       }
     });
 
@@ -263,21 +298,37 @@ module.exports = class AfkStatusToggle {
   }
 
   async _applyAfkOn() {
-    await this._setPresence(this._settings.status);
-    if (this._settings.muteOnAfk) await this._setSelfMute(true);
+    const presenceSet = await this._setPresence(this._settings.status);
+    const muteSet = this._settings.muteOnAfk ? await this._setSelfMute(true) : { success: true };
     const guildId = this._getCurrentGuildId();
-    if (guildId) {
-      await this._prefixCurrentNickname(guildId, this._settings.prefix);
-    }
+    const nicknameSet = guildId ? await this._prefixCurrentNickname(guildId, this._settings.prefix) : { success: true };
+    return {
+      success: presenceSet.success && muteSet.success,
+      message: [
+        presenceSet.success ? null : presenceSet.message,
+        muteSet.success ? null : muteSet.message,
+        guildId ? (nicknameSet.success ? null : nicknameSet.message) : null,
+      ]
+        .filter(Boolean)
+        .join(' | ') || '완료되었습니다.',
+    };
   }
 
   async _applyAfkOff() {
-    await this._setPresence('online');
-    if (this._settings.muteOnAfk) await this._setSelfMute(false);
+    const presenceSet = await this._setPresence('online');
+    const muteSet = this._settings.muteOnAfk ? await this._setSelfMute(false) : { success: true };
     const guildId = this._getCurrentGuildId();
-    if (guildId) {
-      await this._restoreNickname(guildId);
-    }
+    const nicknameSet = guildId ? await this._restoreNickname(guildId) : { success: true };
+    return {
+      success: presenceSet.success && muteSet.success,
+      message: [
+        presenceSet.success ? null : presenceSet.message,
+        muteSet.success ? null : muteSet.message,
+        guildId ? (nicknameSet.success ? null : nicknameSet.message) : null,
+      ]
+        .filter(Boolean)
+        .join(' | ') || '완료되었습니다.',
+    };
   }
 
   _getCurrentGuildId() {
@@ -353,61 +404,87 @@ module.exports = class AfkStatusToggle {
   async _setPresence(status) {
     try {
       const presenceModule = this._findModuleWithProps('setStatus', 'updateStatus') || this._findModule(
-        (m) => m && (typeof m.setStatus === 'function' || typeof m.updateStatus === 'function' || typeof m.setPresence === 'function' || typeof m.updatePresence === 'function'),
+        (m) => m && (
+          typeof m.setStatus === 'function' ||
+          typeof m.updateStatus === 'function' ||
+          typeof m.setPresence === 'function' ||
+          typeof m.updatePresence === 'function' ||
+          typeof m.updateLocalPresence === 'function' ||
+          typeof m.changeStatus === 'function'
+        ),
       );
-      if (!presenceModule) return false;
+      this._debugLog('presenceModule', presenceModule);
+      if (!presenceModule) return { success: false, message: 'Could not find presence module.' };
       if (typeof presenceModule.setStatus === 'function') {
         presenceModule.setStatus(status);
-        return true;
+        return { success: true };
       }
       if (typeof presenceModule.updateStatus === 'function') {
         presenceModule.updateStatus(status);
-        return true;
+        return { success: true };
       }
       if (typeof presenceModule.setPresence === 'function') {
         presenceModule.setPresence(status);
-        return true;
+        return { success: true };
       }
       if (typeof presenceModule.updatePresence === 'function') {
         presenceModule.updatePresence(status);
-        return true;
+        return { success: true };
       }
+      if (typeof presenceModule.updateLocalPresence === 'function') {
+        presenceModule.updateLocalPresence(status);
+        return { success: true };
+      }
+      if (typeof presenceModule.changeStatus === 'function') {
+        presenceModule.changeStatus(status);
+        return { success: true };
+      }
+      return { success: false, message: 'No supported presence function found.' };
     } catch (e) {
       console.warn('[AfkStatusToggle] setPresence failed', e);
+      return { success: false, message: `setPresence error: ${e.message || e}` };
     }
-    return false;
   }
 
   async _setSelfMute(mute) {
     try {
       const voiceModule = this._findModuleWithProps('setSelfMute', 'setLocalMute', 'setMute', 'setMuted', 'muteSelf') || this._findModule(
-        (m) => m && (typeof m.setSelfMute === 'function' || typeof m.setLocalMute === 'function' || typeof m.setMute === 'function' || typeof m.setMuted === 'function' || typeof m.muteSelf === 'function'),
+        (m) => m && (
+          typeof m.setSelfMute === 'function' ||
+          typeof m.setLocalMute === 'function' ||
+          typeof m.setMute === 'function' ||
+          typeof m.setMuted === 'function' ||
+          typeof m.muteSelf === 'function' ||
+          typeof m.setMuted === 'function'
+        ),
       );
-      if (!voiceModule) return false;
+      this._debugLog('voiceModule', voiceModule);
+      if (!voiceModule) return { success: false, message: 'Could not find voice module.' };
       if (typeof voiceModule.setSelfMute === 'function') {
         voiceModule.setSelfMute(mute);
-        return true;
+        return { success: true };
       }
       if (typeof voiceModule.setLocalMute === 'function') {
         voiceModule.setLocalMute(mute);
-        return true;
+        return { success: true };
       }
       if (typeof voiceModule.setMute === 'function') {
         voiceModule.setMute(mute);
-        return true;
+        return { success: true };
       }
       if (typeof voiceModule.setMuted === 'function') {
         voiceModule.setMuted(mute);
-        return true;
+        return { success: true };
       }
       if (typeof voiceModule.muteSelf === 'function') {
         voiceModule.muteSelf(mute);
-        return true;
+        return { success: true };
       }
+      return { success: false, message: 'No supported mute function found.' };
     } catch (e) {
       console.warn('[AfkStatusToggle] setSelfMute failed', e);
+      return { success: false, message: `setSelfMute error: ${e.message || e}` };
     }
-    return false;
   }
 
   _startAutoUpdateTimer() {
@@ -432,7 +509,7 @@ module.exports = class AfkStatusToggle {
   async _checkForUpdates(showToast) {
     const url = this._getUpdateUrl();
     if (!url) {
-      if (showToast) this._toast('@updateUrl이 설정되어 있지 않아 업데이트를 확인할 수 없습니다.', { type: 'warning' });
+      if (showToast) this._toast('Update URL not found in plugin metadata.', { type: 'warning' });
       return;
     }
 
@@ -441,16 +518,16 @@ module.exports = class AfkStatusToggle {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const text = await response.text();
       const remoteVersion = this._extractRemoteVersion(text);
-      if (!remoteVersion) throw new Error('원격 버전을 찾을 수 없습니다.');
+      if (!remoteVersion) throw new Error('Remote version could not be detected.');
       if (this._isRemoteVersionNewer(remoteVersion, this.getVersion())) {
         await this._downloadAndApplyUpdate(url, text, remoteVersion);
-        if (showToast) this._toast(`업데이트됨: v${remoteVersion}`, { type: 'success' });
+        if (showToast) this._toast(`Update available v${remoteVersion}`, { type: 'success' });
       } else if (showToast) {
-        this._toast(`최신 버전입니다 (v${this.getVersion()})`, { type: 'info' });
+        this._toast(`Current version is up to date (v${this.getVersion()}).`, { type: 'info' });
       }
     } catch (e) {
       if (showToast) {
-        this._toast(`업데이트 확인 실패: ${e.message || e}`, { type: 'error' });
+        this._toast(`Update check failed: ${e.message || e}`, { type: 'error' });
       }
       console.warn('[AfkStatusToggle] _checkForUpdates failed', e);
     }
@@ -492,14 +569,14 @@ module.exports = class AfkStatusToggle {
   async _downloadAndApplyUpdate(url, content, version) {
     try {
       const filePath = this._getPluginFilePath();
-      if (!filePath) throw new Error('플러그인 파일 경로를 찾을 수 없습니다.');
+      if (!filePath) throw new Error('Unable to determine plugin file path.');
       const fs = this._nodeRequire('fs');
       fs.writeFileSync(filePath, content, 'utf8');
-      this._toast(`AfkStatusToggle v${version} 설치됨. 재시작 중...`, { type: 'success' });
+      this._toast(`AfkStatusToggle v${version} successfully updated.`, { type: 'success' });
       BdApi.Plugins.reload(this.getName());
     } catch (e) {
       console.warn('[AfkStatusToggle] _downloadAndApplyUpdate failed', e);
-      this._toast('업데이트 적용에 실패했습니다.', { type: 'error' });
+      this._toast('Update download failed.', { type: 'error' });
     }
   }
 
@@ -538,3 +615,4 @@ module.exports = class AfkStatusToggle {
     } catch (_) {}
   }
 };
+
