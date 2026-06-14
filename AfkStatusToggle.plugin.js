@@ -353,7 +353,7 @@ module.exports = class AfkStatusToggle {
   async _prefixCurrentNickname(guildId, prefix) {
     try {
       const userId = this._getCurrentUserId();
-      if (!userId || !guildId) return false;
+      if (!userId || !guildId) return { success: false, message: 'No userId or guildId.' };
       const memberStore = BdApi.Webpack.getModule((m) => m && typeof m.getMember === 'function');
       this._debugLog('memberStore', !!memberStore);
       const member = memberStore?.getMember?.(guildId, userId);
@@ -363,6 +363,8 @@ module.exports = class AfkStatusToggle {
         this._originalNicknames.set(guildId, currentNick);
       }
       const newNick = `${prefix}${currentNick ?? ''}`.trim();
+      
+      // Try guildActions approach
       const guildActions = BdApi.Webpack.getModule((m) => m && (typeof m.editGuildMember === 'function' || typeof m.editMember === 'function' || typeof m.updateGuildMember === 'function' || typeof m.updateMember === 'function'));
       this._debugLog('guildActions', !!guildActions);
       try { this._debugLog('guildActions.keys', Object.keys(guildActions || {})); } catch (_) {}
@@ -373,26 +375,37 @@ module.exports = class AfkStatusToggle {
             try {
               await Promise.resolve(guildActions[f].call(guildActions, guildId, userId, { nick: newNick }));
               this._debugLog(`guildActions.${f} invoked`);
-              return { success: true };
+              return { success: true, method: f };
             } catch (e) {
               this._debugLog(`guildActions.${f} failed`, e.message || e);
             }
           }
         }
       }
+      
+      // Fallback to API if guildActions not found or failed
+      this._debugLog('Falling back to API nickname setter');
+      const apiResult = await this._apiSetNickname(guildId, newNick);
+      if (apiResult.success) {
+        this._debugLog('apiSetNickname succeeded', apiResult.method);
+        return { success: true, method: `api.${apiResult.method}` };
+      }
+      this._debugLog('apiSetNickname failed', apiResult.message);
+      return apiResult;
     } catch (e) {
       console.warn('[AfkStatusToggle] prefixCurrentNickname failed', e);
       return { success: false, message: e.message || String(e) };
     }
-    return { success: false, message: 'No supported guild action found.' };
   }
 
   async _restoreNickname(guildId) {
     try {
       const original = this._originalNicknames.get(guildId);
-      if (original === undefined) return false;
+      if (original === undefined) return { success: true, message: 'No original nickname stored.' };
       const userId = this._getCurrentUserId();
-      if (!userId) return false;
+      if (!userId) return { success: false, message: 'No userId.' };
+      
+      // Try guildActions
       const guildActions = BdApi.Webpack.getModule((m) => m && (typeof m.editGuildMember === 'function' || typeof m.editMember === 'function' || typeof m.updateGuildMember === 'function' || typeof m.updateMember === 'function'));
       this._debugLog('guildActions restore', !!guildActions);
       try { this._debugLog('guildActions.restore.keys', Object.keys(guildActions || {})); } catch (_) {}
@@ -404,18 +417,28 @@ module.exports = class AfkStatusToggle {
               await Promise.resolve(guildActions[f].call(guildActions, guildId, userId, { nick: original }));
               this._originalNicknames.delete(guildId);
               this._debugLog(`guildActions.${f} invoked restore`);
-              return { success: true };
+              return { success: true, method: f };
             } catch (e) {
               this._debugLog(`guildActions.${f} restore failed`, e.message || e);
             }
           }
         }
       }
+      
+      // Fallback to API
+      this._debugLog('Falling back to API for restore');
+      const apiResult = await this._apiSetNickname(guildId, original);
+      if (apiResult.success) {
+        this._originalNicknames.delete(guildId);
+        this._debugLog('apiSetNickname restore succeeded', apiResult.method);
+        return { success: true, method: `api.${apiResult.method}` };
+      }
+      this._debugLog('apiSetNickname restore failed', apiResult.message);
+      return apiResult;
     } catch (e) {
       console.warn('[AfkStatusToggle] restoreNickname failed', e);
       return { success: false, message: e.message || String(e) };
     }
-    return { success: false, message: 'No supported guild action found.' };
   }
 
   _getCurrentUserId() {
@@ -440,7 +463,6 @@ module.exports = class AfkStatusToggle {
           typeof m.changeStatus === 'function'
         ),
       );
-      // Fallback: look for any module with keys containing 'status' or 'presence'
       if (!presenceModule) {
         presenceModule = this._findModule((m) => m && Object.keys(m).some((k) => /status|presence|setPresence|changeStatus/i.test(k)));
       }
@@ -450,6 +472,8 @@ module.exports = class AfkStatusToggle {
 
       const candidates = ['setStatus','updateStatus','setPresence','updatePresence','updateLocalPresence','changeStatus','setUserStatus','setActivity'];
       const errors = [];
+      
+      // First try predefined candidates
       for (const name of candidates) {
         try {
           const fn = presenceModule[name];
@@ -462,7 +486,22 @@ module.exports = class AfkStatusToggle {
           errors.push(`${name}: ${e.message || e}`);
         }
       }
-      return { success: false, message: `No supported presence function worked. Tried: ${candidates.join(', ')}. Errors: ${errors.join(' | ')}` };
+      
+      // Fallback: dynamically try any function with status/presence in name
+      const allKeys = Object.keys(presenceModule);
+      const statusLikeKeys = allKeys.filter((k) => /status|presence|activity/i.test(k) && typeof presenceModule[k] === 'function');
+      this._debugLog('presenceModule.statusLikeKeys', statusLikeKeys);
+      for (const name of statusLikeKeys) {
+        if (candidates.includes(name)) continue;
+        try {
+          const fn = presenceModule[name];
+          await Promise.resolve(fn.call(presenceModule, status));
+          this._debugLog(`presence.${name} invoked (dynamic)`);\n          return { success: true, method: name };
+        } catch (e) {
+          errors.push(`${name}: ${e.message || e}`);
+        }
+      }
+      return { success: false, message: `No supported presence function worked. Tried: ${candidates.join(', ')} + ${statusLikeKeys.join(', ')}. Errors: ${errors.join(' | ')}` };
     } catch (e) {
       console.warn('[AfkStatusToggle] setPresence failed', e);
       return { success: false, message: `setPresence error: ${e.message || e}` };
