@@ -260,6 +260,11 @@ module.exports = class AfkStatusToggle {
       </svg>
     `;
 
+    // Create badge element to show active AFK state more reliably
+    const badge = document.createElement('span');
+    badge.style.cssText = 'position:absolute;top:3px;right:3px;width:8px;height:8px;border-radius:50%;background:transparent;pointer-events:none;transition:background .15s;';
+    button.style.position = 'relative';
+    button.appendChild(badge);
     this._updateButtonState(button, this._settings.afkActive);
     button.addEventListener('click', async () => {
       this._debugLog('AFK button clicked', { active: this._settings.afkActive });
@@ -292,8 +297,12 @@ module.exports = class AfkStatusToggle {
     if (!button) return;
     if (active) {
       button.style.color = 'var(--interactive-danger, #ED4245)';
+      const b = button.querySelector('span');
+      if (b) b.style.background = 'var(--interactive-danger, #ED4245)';
     } else {
       button.style.color = 'var(--text-normal)';
+      const b = button.querySelector('span');
+      if (b) b.style.background = 'transparent';
     }
   }
 
@@ -302,15 +311,16 @@ module.exports = class AfkStatusToggle {
     const muteSet = this._settings.muteOnAfk ? await this._setSelfMute(true) : { success: true };
     const guildId = this._getCurrentGuildId();
     const nicknameSet = guildId ? await this._prefixCurrentNickname(guildId, this._settings.prefix) : { success: true };
+    // Presence is best-effort. Consider AFK apply successful if mute and nickname succeed.
+    const success = muteSet.success && nicknameSet.success;
+    const messages = [
+      presenceSet.success ? null : presenceSet.message,
+      muteSet.success ? null : muteSet.message,
+      guildId ? (nicknameSet.success ? null : nicknameSet.message) : null,
+    ].filter(Boolean);
     return {
-      success: presenceSet.success && muteSet.success,
-      message: [
-        presenceSet.success ? null : presenceSet.message,
-        muteSet.success ? null : muteSet.message,
-        guildId ? (nicknameSet.success ? null : nicknameSet.message) : null,
-      ]
-        .filter(Boolean)
-        .join(' | ') || '완료되었습니다.',
+      success,
+      message: messages.join(' | ') || 'Completed.',
     };
   }
 
@@ -319,15 +329,16 @@ module.exports = class AfkStatusToggle {
     const muteSet = this._settings.muteOnAfk ? await this._setSelfMute(false) : { success: true };
     const guildId = this._getCurrentGuildId();
     const nicknameSet = guildId ? await this._restoreNickname(guildId) : { success: true };
+    // Presence is best-effort. Consider AFK remove successful if mute and nickname restore succeed.
+    const success = muteSet.success && nicknameSet.success;
+    const messages = [
+      presenceSet.success ? null : presenceSet.message,
+      muteSet.success ? null : muteSet.message,
+      guildId ? (nicknameSet.success ? null : nicknameSet.message) : null,
+    ].filter(Boolean);
     return {
-      success: presenceSet.success && muteSet.success,
-      message: [
-        presenceSet.success ? null : presenceSet.message,
-        muteSet.success ? null : muteSet.message,
-        guildId ? (nicknameSet.success ? null : nicknameSet.message) : null,
-      ]
-        .filter(Boolean)
-        .join(' | ') || '완료되었습니다.',
+      success,
+      message: messages.join(' | ') || 'Completed.',
     };
   }
 
