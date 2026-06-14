@@ -1,7 +1,7 @@
 ﻿/**
  * @name AfkStatusToggle
  * @author Shawny
- * @version 1.0.8
+ * @version 1.0.9
  * @description AFK status toggle with nickname prefix, presence status, and optional mic mute.
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/AfkStatusToggle.plugin.js
@@ -35,7 +35,7 @@ module.exports = class AfkStatusToggle {
   }
 
   getVersion() {
-    return '1.0.8';
+    return '1.0.9';
   }
 
   getDescription() {
