@@ -496,7 +496,8 @@ module.exports = class AfkStatusToggle {
         try {
           const fn = presenceModule[name];
           await Promise.resolve(fn.call(presenceModule, status));
-          this._debugLog(`presence.${name} invoked (dynamic)`);\n          return { success: true, method: name };
+          this._debugLog(`presence.${name} invoked (dynamic)`);
+          return { success: true, method: name };
         } catch (e) {
           errors.push(`${name}: ${e.message || e}`);
         }
