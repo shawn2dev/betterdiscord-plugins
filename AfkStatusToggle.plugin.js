@@ -441,6 +441,7 @@ module.exports = class AfkStatusToggle {
         presenceModule = this._findModule((m) => m && Object.keys(m).some((k) => /status|presence|setPresence|changeStatus/i.test(k)));
       }
       this._debugLog('presenceModule (resolved)', presenceModule);
+      try { this._debugLog('presenceModule.keys', Object.keys(presenceModule || {})); } catch (_) {}
       if (!presenceModule) return { success: false, message: 'Could not find presence module.' };
 
       const candidates = ['setStatus','updateStatus','setPresence','updatePresence','updateLocalPresence','changeStatus','setUserStatus','setActivity'];
@@ -476,6 +477,7 @@ module.exports = class AfkStatusToggle {
         ),
       );
       this._debugLog('voiceModule (resolved)', voiceModule);
+      try { this._debugLog('voiceModule.keys', Object.keys(voiceModule || {})); } catch (_) {}
       if (!voiceModule) return { success: false, message: 'Could not find voice module.' };
 
       const candidates = ['setSelfMute','setLocalMute','setMute','setMuted','muteSelf','toggleMute'];
