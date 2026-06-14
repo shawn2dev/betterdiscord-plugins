@@ -492,6 +492,17 @@ module.exports = class AfkStatusToggle {
     const updateUrl = this._getUpdateUrl();
     if (!updateUrl) return;
     this._autoUpdateInterval = setInterval(() => this._checkForUpdates(false), AUTO_UPDATE_CHECK_INTERVAL_MS);
+    // If a recent update was just applied, skip the immediate check once to avoid reload loops.
+    try {
+      if (BdApi && typeof BdApi.loadData === 'function') {
+        const skip = BdApi.loadData(this.getName(), 'skipImmediateUpdateCheck');
+        if (skip) {
+          try { BdApi.saveData(this.getName(), 'skipImmediateUpdateCheck', false); } catch (_) {}
+          return;
+        }
+      }
+    } catch (_) {}
+
     this._checkForUpdates(false);
   }
 
@@ -572,6 +583,8 @@ module.exports = class AfkStatusToggle {
       if (!filePath) throw new Error('Unable to determine plugin file path.');
       const fs = this._nodeRequire('fs');
       fs.writeFileSync(filePath, content, 'utf8');
+      // Mark that we've just applied an update to avoid an immediate re-check loop after reload.
+      try { if (BdApi && typeof BdApi.saveData === 'function') BdApi.saveData(this.getName(), 'skipImmediateUpdateCheck', true); } catch (_) {}
       this._toast(`AfkStatusToggle v${version} successfully updated.`, { type: 'success' });
       BdApi.Plugins.reload(this.getName());
     } catch (e) {
