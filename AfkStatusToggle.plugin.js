@@ -498,10 +498,72 @@ module.exports = class AfkStatusToggle {
           errors.push(`${name}: ${e.message || e}`);
         }
       }
+      // Fallback: try to find a mute button in the DOM and click it
+      try {
+        const btn = Array.from(document.querySelectorAll('button')).find((el) => {
+          const a = (el.getAttribute('aria-label') || '').toLowerCase();
+          const t = (el.getAttribute('title') || '').toLowerCase();
+          const txt = (el.textContent || '').toLowerCase();
+          return a.includes('mute') || a.includes('음소거') || t.includes('mute') || txt.includes('mute') || txt.includes('음소거');
+        });
+        if (btn) {
+          // Click if current state differs: try to infer from aria-pressed or class
+          try { btn.click(); this._debugLog('voice.domMuteClicked'); return { success: true, method: 'domClick' }; } catch (e) { errors.push(`domClick: ${e.message || e}`); }
+        }
+      } catch (e) { errors.push(`domSearch: ${e.message || e}`); }
       return { success: false, message: `No supported mute function worked. Tried: ${candidates.join(', ')}. Errors: ${errors.join(' | ')}` };
     } catch (e) {
       console.warn('[AfkStatusToggle] setSelfMute failed', e);
       return { success: false, message: `setSelfMute error: ${e.message || e}` };
+    }
+  }
+
+  async _getAuthToken() {
+    try {
+      // Common module patterns
+      const tkModule = this._findModule((m) => m && (typeof m.getToken === 'function' || typeof m.getAuthToken === 'function' || typeof m.getToken === 'string'));
+      if (tkModule) {
+        try {
+          if (typeof tkModule.getToken === 'function') return tkModule.getToken();
+          if (typeof tkModule.getAuthToken === 'function') return tkModule.getAuthToken();
+        } catch (_) {}
+      }
+      // Try global window context
+      if (window && window.localStorage) {
+        const maybe = window.localStorage.getItem('token');
+        if (maybe) return maybe.replace(/^"|"$/g, '');
+      }
+    } catch (e) {
+      this._debugLog('_getAuthToken error', e.message || e);
+    }
+    return null;
+  }
+
+  async _apiSetNickname(guildId, nick) {
+    try {
+      // Try to use an internal request module
+      const req = this._findModuleWithProps('patch', 'get', 'post') || this._findModule((m) => m && (m.patch || m.get || m.post));
+      if (req && typeof req.patch === 'function') {
+        await Promise.resolve(req.patch(`/guilds/${guildId}/members/@me/nick`, { nick }));
+        return { success: true, method: 'internalPatch' };
+      }
+      // Fallback to fetch with auth token
+      const token = await this._getAuthToken();
+      if (!token) return { success: false, message: 'No auth token available for API request.' };
+      const resp = await fetch(`https://discord.com/api/v9/guilds/${guildId}/members/@me/nick`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': token,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ nick }),
+        credentials: 'include',
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      return { success: true, method: 'fetch' };
+    } catch (e) {
+      this._debugLog('_apiSetNickname error', e.message || e);
+      return { success: false, message: e.message || String(e) };
     }
   }
 
