@@ -355,21 +355,28 @@ module.exports = class AfkStatusToggle {
       const userId = this._getCurrentUserId();
       if (!userId || !guildId) return false;
       const memberStore = BdApi.Webpack.getModule((m) => m && typeof m.getMember === 'function');
+      this._debugLog('memberStore', !!memberStore);
       const member = memberStore?.getMember?.(guildId, userId);
+      this._debugLog('member', member);
       const currentNick = member?.nick || member?.user?.username || null;
       if (!this._originalNicknames.has(guildId)) {
         this._originalNicknames.set(guildId, currentNick);
       }
       const newNick = `${prefix}${currentNick ?? ''}`.trim();
-      const guildActions = BdApi.Webpack.getModule((m) => m && (typeof m.editGuildMember === 'function' || typeof m.editMember === 'function'));
+      const guildActions = BdApi.Webpack.getModule((m) => m && (typeof m.editGuildMember === 'function' || typeof m.editMember === 'function' || typeof m.updateGuildMember === 'function' || typeof m.updateMember === 'function'));
+      this._debugLog('guildActions', !!guildActions);
       if (guildActions) {
-        if (typeof guildActions.editGuildMember === 'function') {
-          await guildActions.editGuildMember(guildId, userId, { nick: newNick });
-          return true;
-        }
-        if (typeof guildActions.editMember === 'function') {
-          await guildActions.editMember(guildId, userId, { nick: newNick });
-          return true;
+        const funcs = ['editGuildMember','editMember','updateGuildMember','updateMember'];
+        for (const f of funcs) {
+          if (typeof guildActions[f] === 'function') {
+            try {
+              await Promise.resolve(guildActions[f].call(guildActions, guildId, userId, { nick: newNick }));
+              this._debugLog(`guildActions.${f} invoked`);
+              return true;
+            } catch (e) {
+              this._debugLog(`guildActions.${f} failed`, e.message || e);
+            }
+          }
         }
       }
     } catch (e) {
@@ -384,17 +391,21 @@ module.exports = class AfkStatusToggle {
       if (original === undefined) return false;
       const userId = this._getCurrentUserId();
       if (!userId) return false;
-      const guildActions = BdApi.Webpack.getModule((m) => m && (typeof m.editGuildMember === 'function' || typeof m.editMember === 'function'));
+      const guildActions = BdApi.Webpack.getModule((m) => m && (typeof m.editGuildMember === 'function' || typeof m.editMember === 'function' || typeof m.updateGuildMember === 'function' || typeof m.updateMember === 'function'));
+      this._debugLog('guildActions restore', !!guildActions);
       if (guildActions) {
-        if (typeof guildActions.editGuildMember === 'function') {
-          await guildActions.editGuildMember(guildId, userId, { nick: original });
-          this._originalNicknames.delete(guildId);
-          return true;
-        }
-        if (typeof guildActions.editMember === 'function') {
-          await guildActions.editMember(guildId, userId, { nick: original });
-          this._originalNicknames.delete(guildId);
-          return true;
+        const funcs = ['editGuildMember','editMember','updateGuildMember','updateMember'];
+        for (const f of funcs) {
+          if (typeof guildActions[f] === 'function') {
+            try {
+              await Promise.resolve(guildActions[f].call(guildActions, guildId, userId, { nick: original }));
+              this._originalNicknames.delete(guildId);
+              this._debugLog(`guildActions.${f} invoked restore`);
+              return true;
+            } catch (e) {
+              this._debugLog(`guildActions.${f} restore failed`, e.message || e);
+            }
+          }
         }
       }
     } catch (e) {
@@ -414,7 +425,8 @@ module.exports = class AfkStatusToggle {
 
   async _setPresence(status) {
     try {
-      const presenceModule = this._findModuleWithProps('setStatus', 'updateStatus') || this._findModule(
+      // Try to find a presence module using multiple heuristics
+      let presenceModule = this._findModuleWithProps('setStatus', 'updateStatus') || this._findModule(
         (m) => m && (
           typeof m.setStatus === 'function' ||
           typeof m.updateStatus === 'function' ||
@@ -424,33 +436,28 @@ module.exports = class AfkStatusToggle {
           typeof m.changeStatus === 'function'
         ),
       );
-      this._debugLog('presenceModule', presenceModule);
+      // Fallback: look for any module with keys containing 'status' or 'presence'
+      if (!presenceModule) {
+        presenceModule = this._findModule((m) => m && Object.keys(m).some((k) => /status|presence|setPresence|changeStatus/i.test(k)));
+      }
+      this._debugLog('presenceModule (resolved)', presenceModule);
       if (!presenceModule) return { success: false, message: 'Could not find presence module.' };
-      if (typeof presenceModule.setStatus === 'function') {
-        presenceModule.setStatus(status);
-        return { success: true };
+
+      const candidates = ['setStatus','updateStatus','setPresence','updatePresence','updateLocalPresence','changeStatus','setUserStatus','setActivity'];
+      const errors = [];
+      for (const name of candidates) {
+        try {
+          const fn = presenceModule[name];
+          if (typeof fn === 'function') {
+            await Promise.resolve(fn.call(presenceModule, status));
+            this._debugLog(`presence.${name} invoked`);
+            return { success: true, method: name };
+          }
+        } catch (e) {
+          errors.push(`${name}: ${e.message || e}`);
+        }
       }
-      if (typeof presenceModule.updateStatus === 'function') {
-        presenceModule.updateStatus(status);
-        return { success: true };
-      }
-      if (typeof presenceModule.setPresence === 'function') {
-        presenceModule.setPresence(status);
-        return { success: true };
-      }
-      if (typeof presenceModule.updatePresence === 'function') {
-        presenceModule.updatePresence(status);
-        return { success: true };
-      }
-      if (typeof presenceModule.updateLocalPresence === 'function') {
-        presenceModule.updateLocalPresence(status);
-        return { success: true };
-      }
-      if (typeof presenceModule.changeStatus === 'function') {
-        presenceModule.changeStatus(status);
-        return { success: true };
-      }
-      return { success: false, message: 'No supported presence function found.' };
+      return { success: false, message: `No supported presence function worked. Tried: ${candidates.join(', ')}. Errors: ${errors.join(' | ')}` };
     } catch (e) {
       console.warn('[AfkStatusToggle] setPresence failed', e);
       return { success: false, message: `setPresence error: ${e.message || e}` };
@@ -465,33 +472,27 @@ module.exports = class AfkStatusToggle {
           typeof m.setLocalMute === 'function' ||
           typeof m.setMute === 'function' ||
           typeof m.setMuted === 'function' ||
-          typeof m.muteSelf === 'function' ||
-          typeof m.setMuted === 'function'
+          typeof m.muteSelf === 'function'
         ),
       );
-      this._debugLog('voiceModule', voiceModule);
+      this._debugLog('voiceModule (resolved)', voiceModule);
       if (!voiceModule) return { success: false, message: 'Could not find voice module.' };
-      if (typeof voiceModule.setSelfMute === 'function') {
-        voiceModule.setSelfMute(mute);
-        return { success: true };
+
+      const candidates = ['setSelfMute','setLocalMute','setMute','setMuted','muteSelf','toggleMute'];
+      const errors = [];
+      for (const name of candidates) {
+        try {
+          const fn = voiceModule[name];
+          if (typeof fn === 'function') {
+            await Promise.resolve(fn.call(voiceModule, mute));
+            this._debugLog(`voice.${name} invoked`);
+            return { success: true, method: name };
+          }
+        } catch (e) {
+          errors.push(`${name}: ${e.message || e}`);
+        }
       }
-      if (typeof voiceModule.setLocalMute === 'function') {
-        voiceModule.setLocalMute(mute);
-        return { success: true };
-      }
-      if (typeof voiceModule.setMute === 'function') {
-        voiceModule.setMute(mute);
-        return { success: true };
-      }
-      if (typeof voiceModule.setMuted === 'function') {
-        voiceModule.setMuted(mute);
-        return { success: true };
-      }
-      if (typeof voiceModule.muteSelf === 'function') {
-        voiceModule.muteSelf(mute);
-        return { success: true };
-      }
-      return { success: false, message: 'No supported mute function found.' };
+      return { success: false, message: `No supported mute function worked. Tried: ${candidates.join(', ')}. Errors: ${errors.join(' | ')}` };
     } catch (e) {
       console.warn('[AfkStatusToggle] setSelfMute failed', e);
       return { success: false, message: `setSelfMute error: ${e.message || e}` };
