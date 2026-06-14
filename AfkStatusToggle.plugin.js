@@ -15,7 +15,6 @@ const DEFAULT_PLUGIN_SETTINGS = {
   status: 'idle',
   muteOnAfk: true,
   autoUpdate: true,
-  updateUrl: '',
   afkActive: false,
 };
 
@@ -114,16 +113,7 @@ module.exports = class AfkStatusToggle {
     muteRow.appendChild(muteToggle);
     muteSection.appendChild(muteRow);
 
-    const updateSection = makeSection('자동 업데이트', '플러그인 업데이트 URL을 입력하면 자동으로 새 버전을 확인합니다.');
-    const updateInput = document.createElement('input');
-    updateInput.type = 'text';
-    updateInput.placeholder = 'Raw plugin URL (GitHub raw 등)';
-    updateInput.value = this._settings.updateUrl;
-    updateInput.style.cssText = 'width:100%;padding:8px;border-radius:8px;border:1px solid var(--background-modifier-accent);background:var(--background-primary);color:var(--text-normal);';
-    updateInput.addEventListener('change', () => {
-      this._settings.updateUrl = updateInput.value.trim();
-      this._saveSettings();
-    });
+    const updateSection = makeSection('자동 업데이트', '플러그인의 @updateUrl 메타데이터를 사용하여 새 버전을 확인합니다.');
     const autoUpdateRow = document.createElement('div');
     autoUpdateRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;';
     const autoUpdateText = document.createElement('div');
@@ -140,9 +130,12 @@ module.exports = class AfkStatusToggle {
     checkNowButton.textContent = '지금 업데이트 확인';
     checkNowButton.style.cssText = 'padding:8px 12px;border-radius:8px;border:none;background:#5865f2;color:#ffffff;font-weight:600;cursor:pointer;';
     checkNowButton.addEventListener('click', () => this._checkForUpdates(true));
-    updateSection.appendChild(updateInput);
+    const urlHint = document.createElement('div');
+    urlHint.textContent = '@updateUrl 에 설정된 플러그인 URL을 사용합니다.';
+    urlHint.style.cssText = 'font-size:12px;color:var(--text-muted);';
     updateSection.appendChild(autoUpdateRow);
     updateSection.appendChild(checkNowButton);
+    updateSection.appendChild(urlHint);
 
     root.appendChild(prefixSection);
     root.appendChild(statusSection);
@@ -389,7 +382,9 @@ module.exports = class AfkStatusToggle {
 
   _startAutoUpdateTimer() {
     this._stopAutoUpdateTimer();
-    if (!this._settings.autoUpdate || !this._settings.updateUrl) return;
+    if (!this._settings.autoUpdate) return;
+    const updateUrl = this._getUpdateUrl();
+    if (!updateUrl) return;
     this._autoUpdateInterval = setInterval(() => this._checkForUpdates(false), AUTO_UPDATE_CHECK_INTERVAL_MS);
     this._checkForUpdates(false);
   }
@@ -406,9 +401,9 @@ module.exports = class AfkStatusToggle {
   }
 
   async _checkForUpdates(showToast) {
-    const url = this._settings.updateUrl?.trim();
+    const url = this._getUpdateUrl();
     if (!url) {
-      if (showToast) this._toast('업데이트 URL이 설정되어 있지 않습니다.', { type: 'warning' });
+      if (showToast) this._toast('@updateUrl이 설정되어 있지 않아 업데이트를 확인할 수 없습니다.', { type: 'warning' });
       return;
     }
 
@@ -429,6 +424,20 @@ module.exports = class AfkStatusToggle {
         this._toast(`업데이트 확인 실패: ${e.message || e}`, { type: 'error' });
       }
       console.warn('[AfkStatusToggle] _checkForUpdates failed', e);
+    }
+  }
+
+  _getUpdateUrl() {
+    try {
+      const path = this._getPluginFilePath();
+      if (!path) return null;
+      const fs = this._nodeRequire('fs');
+      const content = fs.readFileSync(path, 'utf8');
+      const match = content.match(/@updateUrl\s+(.+)/i);
+      return match ? match[1].trim() : null;
+    } catch (e) {
+      console.warn('[AfkStatusToggle] _getUpdateUrl failed', e);
+      return null;
     }
   }
 
