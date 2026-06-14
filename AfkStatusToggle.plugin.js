@@ -365,6 +365,7 @@ module.exports = class AfkStatusToggle {
       const newNick = `${prefix}${currentNick ?? ''}`.trim();
       const guildActions = BdApi.Webpack.getModule((m) => m && (typeof m.editGuildMember === 'function' || typeof m.editMember === 'function' || typeof m.updateGuildMember === 'function' || typeof m.updateMember === 'function'));
       this._debugLog('guildActions', !!guildActions);
+      try { this._debugLog('guildActions.keys', Object.keys(guildActions || {})); } catch (_) {}
       if (guildActions) {
         const funcs = ['editGuildMember','editMember','updateGuildMember','updateMember'];
         for (const f of funcs) {
@@ -372,7 +373,7 @@ module.exports = class AfkStatusToggle {
             try {
               await Promise.resolve(guildActions[f].call(guildActions, guildId, userId, { nick: newNick }));
               this._debugLog(`guildActions.${f} invoked`);
-              return true;
+              return { success: true };
             } catch (e) {
               this._debugLog(`guildActions.${f} failed`, e.message || e);
             }
@@ -381,8 +382,9 @@ module.exports = class AfkStatusToggle {
       }
     } catch (e) {
       console.warn('[AfkStatusToggle] prefixCurrentNickname failed', e);
+      return { success: false, message: e.message || String(e) };
     }
-    return false;
+    return { success: false, message: 'No supported guild action found.' };
   }
 
   async _restoreNickname(guildId) {
@@ -393,6 +395,7 @@ module.exports = class AfkStatusToggle {
       if (!userId) return false;
       const guildActions = BdApi.Webpack.getModule((m) => m && (typeof m.editGuildMember === 'function' || typeof m.editMember === 'function' || typeof m.updateGuildMember === 'function' || typeof m.updateMember === 'function'));
       this._debugLog('guildActions restore', !!guildActions);
+      try { this._debugLog('guildActions.restore.keys', Object.keys(guildActions || {})); } catch (_) {}
       if (guildActions) {
         const funcs = ['editGuildMember','editMember','updateGuildMember','updateMember'];
         for (const f of funcs) {
@@ -401,7 +404,7 @@ module.exports = class AfkStatusToggle {
               await Promise.resolve(guildActions[f].call(guildActions, guildId, userId, { nick: original }));
               this._originalNicknames.delete(guildId);
               this._debugLog(`guildActions.${f} invoked restore`);
-              return true;
+              return { success: true };
             } catch (e) {
               this._debugLog(`guildActions.${f} restore failed`, e.message || e);
             }
@@ -410,8 +413,9 @@ module.exports = class AfkStatusToggle {
       }
     } catch (e) {
       console.warn('[AfkStatusToggle] restoreNickname failed', e);
+      return { success: false, message: e.message || String(e) };
     }
-    return false;
+    return { success: false, message: 'No supported guild action found.' };
   }
 
   _getCurrentUserId() {
