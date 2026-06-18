@@ -2,7 +2,7 @@
  * @name ShawnyHelper
  * @author Shawny
  * @description Prevent AFK voice channel moves caused by Discord idle/AFK handling and helpers for shawnybot.
- * @version 1.8.11
+ * @version 1.9.0
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/ShawnyHelper.plugin.js
  */
@@ -43,6 +43,14 @@ module.exports = class ShawnyHelper {
     this.useAudioKeepalive = true;
     this._clientLogConfig = { ..._CLIENT_LOG };
     this._autoUpdateInterval = null;
+    
+    // Highlight feature
+    this.highlightEnabled = true;
+    this.highlightUserIds = [];
+    this.highlightColor = '#b50000';
+    this.highlightChatNames = false;
+    this._voiceMutationObserver = null;
+    this._chatMutationObserver = null;
   }
 
   getName() {
@@ -52,7 +60,7 @@ module.exports = class ShawnyHelper {
     return 'AFK 방지 및 shawnybot helper 기능.';
   }
   getVersion() {
-    return '1.8.11';
+    return '1.9.0';
   }
   getAuthor() {
     return 'Shawny';
@@ -1013,6 +1021,10 @@ module.exports = class ShawnyHelper {
         intervalSecs: this.intervalSecs,
         enabled: this.enabled,
         useAudioKeepalive: this.useAudioKeepalive,
+        highlightEnabled: this.highlightEnabled,
+        highlightUserIds: this.highlightUserIds,
+        highlightColor: this.highlightColor,
+        highlightChatNames: this.highlightChatNames,
       });
     } catch (_) {}
   }
@@ -1034,6 +1046,10 @@ module.exports = class ShawnyHelper {
         this.intervalSecs = saved.intervalSecs ?? 30;
         this.enabled = saved.enabled ?? true;
         this.useAudioKeepalive = saved.useAudioKeepalive ?? true;
+        this.highlightEnabled = saved.highlightEnabled ?? true;
+        this.highlightUserIds = saved.highlightUserIds ?? [];
+        this.highlightColor = saved.highlightColor ?? '#b50000';
+        this.highlightChatNames = saved.highlightChatNames ?? false;
       }
     } catch (_) {}
 
@@ -1046,6 +1062,10 @@ module.exports = class ShawnyHelper {
       }
       this._startInterval();
       if (this.useAudioKeepalive) this._startAudioKeepAlive();
+    }
+
+    if (this.highlightEnabled) {
+      this._startHighlightObservers();
     }
 
     this._onVisibility = () => {
@@ -1076,6 +1096,7 @@ module.exports = class ShawnyHelper {
     this._stopAudioKeepAlive();
     this._stopDispatchPatch();
     this._stopClientLogPatch();
+    this._stopHighlightObservers();
     this.Dispatcher = null;
     this._toast('ShawnyHelper 중지됨', { type: 'info' });
   }
@@ -1220,8 +1241,219 @@ module.exports = class ShawnyHelper {
     updateBtn.addEventListener('click', () => this._checkForUpdatesNow());
     updateRow.append(updateLabel, updateBtn);
 
-    root.append(row, hr, audioRow, sliderWrap, status, dispStatus, updateRow, note);
+    const hr2 = Object.assign(document.createElement('hr'), {
+      style:
+        'border:none;border-top:1px solid var(--background-modifier-accent);margin:0;',
+    });
+
+    // Highlight Feature Section
+    const highlightRow = Object.assign(document.createElement('div'), {
+      style: 'display:flex;align-items:center;justify-content:space-between;',
+    });
+    const highlightLabel = document.createElement('div');
+    highlightLabel.innerHTML = `
+            <div style="font-size:14px;font-weight:600;color:var(--header-primary);">유저 하이라이트</div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">음성 채널 및 채팅에서 유저 강조</div>
+        `;
+    const highlightToggle = this._buildToggle(this.highlightEnabled, (v) => {
+      this.highlightEnabled = v;
+      this._save();
+      if (v) {
+        this._startHighlightObservers();
+        this._toast('유저 하이라이트 활성화', { type: 'success' });
+      } else {
+        this._stopHighlightObservers();
+        this._toast('유저 하이라이트 비활성화', { type: 'info' });
+      }
+    });
+    highlightRow.append(highlightLabel, highlightToggle);
+
+    // Color Selection
+    const colorWrap = document.createElement('div');
+    const colorTitle = Object.assign(document.createElement('div'), {
+      style:
+        'font-size:14px;font-weight:600;color:var(--header-primary);margin-bottom:8px;',
+      textContent: '하이라이트 색상 선택',
+    });
+    const colorContainer = Object.assign(document.createElement('div'), {
+      style: 'display:flex;gap:8px;flex-wrap:wrap;',
+    });
+    const colors = ['#b50000', '#6957ff', '#ffc31b', '#ffffff', '#000000'];
+    colors.forEach((color) => {
+      const colorBtn = Object.assign(document.createElement('div'), {
+        style: `
+          width:40px;height:40px;border-radius:4px;background-color:${color};
+          border:${this.highlightColor === color ? '3px solid #5865F2' : '2px solid var(--background-modifier-accent)'};
+          cursor:pointer;transition:all 0.2s;
+        `,
+        title: color,
+      });
+      colorBtn.addEventListener('click', () => {
+        this.highlightColor = color;
+        this._save();
+        Array.from(colorContainer.children).forEach((btn) => {
+          const btnColor = btn.title;
+          btn.style.border = btnColor === color ? '3px solid #5865F2' : '2px solid var(--background-modifier-accent)';
+        });
+        this._startVoiceHighlightObserver();
+        this._startChatHighlightObserver();
+      });
+      colorContainer.append(colorBtn);
+    });
+    colorWrap.append(colorTitle, colorContainer);
+
+    // User ID Input
+    const userIdWrap = document.createElement('div');
+    const userIdTitle = Object.assign(document.createElement('div'), {
+      style:
+        'font-size:14px;font-weight:600;color:var(--header-primary);margin-bottom:4px;',
+      textContent: '유저 ID (쉼표로 구분)',
+    });
+    const userIdDesc = Object.assign(document.createElement('div'), {
+      style: 'font-size:12px;color:var(--text-muted);margin-bottom:8px;',
+      textContent:
+        '예: 123456789,987654321',
+    });
+    const userIdInput = Object.assign(document.createElement('input'), {
+      type: 'text',
+      placeholder: '유저 ID를 입력하세요',
+      value: this.highlightUserIds.join(','),
+      style:
+        'width:100%;padding:8px 12px;border-radius:4px;border:1px solid var(--background-modifier-accent);background:var(--background-secondary);color:var(--text-normal);font-size:13px;',
+    });
+    userIdInput.addEventListener('change', () => {
+      const ids = userIdInput.value
+        .split(',')
+        .map((id) => id.trim())
+        .filter((id) => id.length > 0);
+      this.highlightUserIds = ids;
+      this._save();
+      this._startVoiceHighlightObserver();
+      this._startChatHighlightObserver();
+    });
+    userIdWrap.append(userIdTitle, userIdDesc, userIdInput);
+
+    // Chat Names Highlight Option
+    const chatHighlightRow = Object.assign(document.createElement('div'), {
+      style: 'display:flex;align-items:center;justify-content:space-between;',
+    });
+    const chatHighlightLabel = document.createElement('div');
+    chatHighlightLabel.innerHTML = `
+            <div style="font-size:14px;font-weight:600;color:var(--header-primary);">채팅 이름 하이라이트</div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">채팅에서 유저 이름에 하이라이트 적용</div>
+        `;
+    const chatHighlightToggle = this._buildToggle(this.highlightChatNames, (v) => {
+      this.highlightChatNames = v;
+      this._save();
+      if (v) {
+        this._startChatHighlightObserver();
+        this._toast('채팅 이름 하이라이트 활성화', { type: 'success' });
+      } else {
+        if (this._chatMutationObserver) {
+          this._chatMutationObserver.disconnect();
+          this._chatMutationObserver = null;
+        }
+        // Remove existing highlights
+        document.querySelectorAll('span[class*="username"]').forEach((span) => {
+          span.style.borderBottom = '';
+        });
+        this._toast('채팅 이름 하이라이트 비활성화', { type: 'info' });
+      }
+    });
+    chatHighlightRow.append(chatHighlightLabel, chatHighlightToggle);
+
+    root.append(row, hr, audioRow, sliderWrap, status, dispStatus, updateRow, hr2, highlightRow, colorWrap, userIdWrap, chatHighlightRow, note);
     return root;
+  }
+
+  _startHighlightObservers() {
+    this._startVoiceHighlightObserver();
+    this._startChatHighlightObserver();
+  }
+
+  _stopHighlightObservers() {
+    if (this._voiceMutationObserver) {
+      this._voiceMutationObserver.disconnect();
+      this._voiceMutationObserver = null;
+    }
+    if (this._chatMutationObserver) {
+      this._chatMutationObserver.disconnect();
+      this._chatMutationObserver = null;
+    }
+  }
+
+  _startVoiceHighlightObserver() {
+    if (!this.highlightEnabled || this.highlightUserIds.length === 0) return;
+    
+    const checkAndHighlight = () => {
+      for (const userId of this.highlightUserIds) {
+        const elements = document.querySelectorAll(
+          `div[style*="background-image"][style*="${userId}"]`
+        );
+        elements.forEach((elem) => {
+          const parent = elem.parentElement;
+          if (parent && !parent.style.borderLeft) {
+            parent.style.borderLeft = `4px solid ${this.highlightColor}`;
+            parent.style.borderRadius = '4px';
+          }
+        });
+      }
+    };
+
+    if (this._voiceMutationObserver) {
+      this._voiceMutationObserver.disconnect();
+    }
+
+    this._voiceMutationObserver = new MutationObserver(() => {
+      checkAndHighlight();
+    });
+
+    const voiceContainer = document.querySelector('[class*="voice"]');
+    if (voiceContainer) {
+      this._voiceMutationObserver.observe(voiceContainer, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['style'],
+      });
+    }
+
+    checkAndHighlight();
+  }
+
+  _startChatHighlightObserver() {
+    if (!this.highlightEnabled || !this.highlightChatNames || this.highlightUserIds.length === 0) return;
+
+    const checkAndHighlight = () => {
+      for (const userId of this.highlightUserIds) {
+        const items = document.querySelectorAll(`li[data-author-id="${userId}"]`);
+        items.forEach((item) => {
+          const usernameSpan = item.querySelector('span[class*="username"]');
+          if (usernameSpan && !usernameSpan.style.borderBottom) {
+            usernameSpan.style.borderBottom = `2px solid ${this.highlightColor}`;
+          }
+        });
+      }
+    };
+
+    if (this._chatMutationObserver) {
+      this._chatMutationObserver.disconnect();
+    }
+
+    this._chatMutationObserver = new MutationObserver(() => {
+      checkAndHighlight();
+    });
+
+    const chatContainer = document.querySelector('[class*="chat"]');
+    if (chatContainer) {
+      this._chatMutationObserver.observe(chatContainer, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    }
+
+    checkAndHighlight();
   }
 
   _buildToggle(initialValue, onChange) {
