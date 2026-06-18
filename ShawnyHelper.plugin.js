@@ -2,7 +2,7 @@
  * @name ShawnyHelper
  * @author Shawny
  * @description Prevent AFK voice channel moves caused by Discord idle/AFK handling and helpers for shawnybot.
- * @version 1.9.0
+ * @version 1.9.3
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/ShawnyHelper.plugin.js
  */
@@ -51,6 +51,7 @@ module.exports = class ShawnyHelper {
     this.highlightChatNames = false;
     this._voiceMutationObserver = null;
     this._chatMutationObserver = null;
+    this._highlightCheckInterval = null;
   }
 
   getName() {
@@ -60,7 +61,7 @@ module.exports = class ShawnyHelper {
     return 'AFK 방지 및 shawnybot helper 기능.';
   }
   getVersion() {
-    return '1.9.0';
+    return '1.9.3';
   }
   getAuthor() {
     return 'Shawny';
@@ -1015,9 +1016,33 @@ module.exports = class ShawnyHelper {
     }
   }
 
+  _configPath() {
+    try {
+      const path = this._nodeRequire('path');
+      return path.join(BdApi.Plugins.folder, 'ShawnyHelper.config.json');
+    } catch (_) {
+      return null;
+    }
+  }
+
   _save() {
     try {
-      BdApi.saveData('ShawnyHelper', 'settings', {
+      const filePath = this._configPath();
+      if (!filePath) {
+        // fallback: BdApi storage
+        BdApi.saveData('ShawnyHelper', 'settings', {
+          intervalSecs: this.intervalSecs,
+          enabled: this.enabled,
+          useAudioKeepalive: this.useAudioKeepalive,
+          highlightEnabled: this.highlightEnabled,
+          highlightUserIds: this.highlightUserIds,
+          highlightColor: this.highlightColor,
+          highlightChatNames: this.highlightChatNames,
+        });
+        return;
+      }
+      const fs = this._nodeRequire('fs');
+      const data = {
         intervalSecs: this.intervalSecs,
         enabled: this.enabled,
         useAudioKeepalive: this.useAudioKeepalive,
@@ -1025,8 +1050,33 @@ module.exports = class ShawnyHelper {
         highlightUserIds: this.highlightUserIds,
         highlightColor: this.highlightColor,
         highlightChatNames: this.highlightChatNames,
-      });
+      };
+      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+    } catch (err) {
+      console.warn('[ShawnyHelper] 설정 저장 실패:', err);
+    }
+  }
+
+  _load() {
+    // 1) config.json 파일 우선
+    try {
+      const filePath = this._configPath();
+      if (filePath) {
+        const fs = this._nodeRequire('fs');
+        if (fs.existsSync(filePath)) {
+          const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+          if (parsed && typeof parsed === 'object') return parsed;
+        }
+      }
+    } catch (err) {
+      console.warn('[ShawnyHelper] config.json 로드 실패, BdApi fallback 시도:', err);
+    }
+    // 2) fallback: BdApi storage (이전 버전 마이그레이션)
+    try {
+      const saved = BdApi.loadData('ShawnyHelper', 'settings');
+      if (saved && typeof saved === 'object') return saved;
     } catch (_) {}
+    return null;
   }
 
   _syncClientLogPatch() {
@@ -1041,7 +1091,7 @@ module.exports = class ShawnyHelper {
 
   start() {
     try {
-      const saved = BdApi.loadData('ShawnyHelper', 'settings');
+      const saved = this._load();
       if (saved) {
         this.intervalSecs = saved.intervalSecs ?? 30;
         this.enabled = saved.enabled ?? true;
@@ -1353,9 +1403,10 @@ module.exports = class ShawnyHelper {
           this._chatMutationObserver.disconnect();
           this._chatMutationObserver = null;
         }
-        // Remove existing highlights
-        document.querySelectorAll('span[class*="username"]').forEach((span) => {
+        // Remove existing highlights with attribute
+        document.querySelectorAll('[data-shawny-highlight="chat"]').forEach((span) => {
           span.style.borderBottom = '';
+          span.removeAttribute('data-shawny-highlight');
         });
         this._toast('채팅 이름 하이라이트 비활성화', { type: 'info' });
       }
@@ -1380,80 +1431,109 @@ module.exports = class ShawnyHelper {
       this._chatMutationObserver.disconnect();
       this._chatMutationObserver = null;
     }
+    if (this._highlightCheckInterval) {
+      clearInterval(this._highlightCheckInterval);
+      this._highlightCheckInterval = null;
+    }
   }
 
   _startVoiceHighlightObserver() {
     if (!this.highlightEnabled || this.highlightUserIds.length === 0) return;
-    
-    const checkAndHighlight = () => {
+
+    const applyHighlights = () => {
+      // 기존 하이라이트 제거
+      document.querySelectorAll('[data-shawny-highlight="voice"]').forEach((elem) => {
+        elem.style.borderLeft = '';
+        elem.style.borderRadius = '';
+        elem.removeAttribute('data-shawny-highlight');
+      });
+      // 새로 적용
       for (const userId of this.highlightUserIds) {
-        const elements = document.querySelectorAll(
+        document.querySelectorAll(
           `div[style*="background-image"][style*="${userId}"]`
-        );
-        elements.forEach((elem) => {
+        ).forEach((elem) => {
           const parent = elem.parentElement;
-          if (parent && !parent.style.borderLeft) {
+          if (parent && !parent.className.includes('avatarContainer')) {
             parent.style.borderLeft = `4px solid ${this.highlightColor}`;
             parent.style.borderRadius = '4px';
+            parent.setAttribute('data-shawny-highlight', 'voice');
           }
         });
       }
+    };
+
+    // debounce: MO 콜백이 연속으로 쏟아져도 16ms 후 1번만 실행
+    let _rafId = null;
+    const debounced = () => {
+      if (_rafId) return;
+      _rafId = requestAnimationFrame(() => {
+        _rafId = null;
+        applyHighlights();
+      });
     };
 
     if (this._voiceMutationObserver) {
       this._voiceMutationObserver.disconnect();
     }
 
-    this._voiceMutationObserver = new MutationObserver(() => {
-      checkAndHighlight();
+    // attributes 감시 제거 — 스크롤마다 수백 번 발화하는 주범
+    // childList + subtree 만으로 새 음성 참여자 삽입/제거를 잡음
+    this._voiceMutationObserver = new MutationObserver(debounced);
+    this._voiceMutationObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
     });
 
-    const voiceContainer = document.querySelector('[class*="voice"]');
-    if (voiceContainer) {
-      this._voiceMutationObserver.observe(voiceContainer, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['style'],
-      });
+    // 2초 폴링: 가상화된 목록 스크롤 보완 (MO가 삽입을 이미 잡으므로 짧을 필요 없음)
+    if (this._highlightCheckInterval) {
+      clearInterval(this._highlightCheckInterval);
     }
+    this._highlightCheckInterval = setInterval(applyHighlights, 2000);
 
-    checkAndHighlight();
+    applyHighlights();
   }
 
   _startChatHighlightObserver() {
     if (!this.highlightEnabled || !this.highlightChatNames || this.highlightUserIds.length === 0) return;
 
-    const checkAndHighlight = () => {
+    const applyHighlights = () => {
+      document.querySelectorAll('[data-shawny-highlight="chat"]').forEach((elem) => {
+        elem.style.borderBottom = '';
+        elem.removeAttribute('data-shawny-highlight');
+      });
       for (const userId of this.highlightUserIds) {
-        const items = document.querySelectorAll(`li[data-author-id="${userId}"]`);
-        items.forEach((item) => {
+        document.querySelectorAll(`li[data-author-id="${userId}"]`).forEach((item) => {
           const usernameSpan = item.querySelector('span[class*="username"]');
-          if (usernameSpan && !usernameSpan.style.borderBottom) {
+          if (usernameSpan) {
             usernameSpan.style.borderBottom = `2px solid ${this.highlightColor}`;
+            usernameSpan.setAttribute('data-shawny-highlight', 'chat');
           }
         });
       }
+    };
+
+    let _rafId = null;
+    const debounced = () => {
+      if (_rafId) return;
+      _rafId = requestAnimationFrame(() => {
+        _rafId = null;
+        applyHighlights();
+      });
     };
 
     if (this._chatMutationObserver) {
       this._chatMutationObserver.disconnect();
     }
 
-    this._chatMutationObserver = new MutationObserver(() => {
-      checkAndHighlight();
+    // characterData 제거 — 타이핑마다 발화하는 주범
+    // childList + subtree 만으로 새 메시지 삽입을 잡음
+    this._chatMutationObserver = new MutationObserver(debounced);
+    this._chatMutationObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
     });
 
-    const chatContainer = document.querySelector('[class*="chat"]');
-    if (chatContainer) {
-      this._chatMutationObserver.observe(chatContainer, {
-        childList: true,
-        subtree: true,
-        characterData: true,
-      });
-    }
-
-    checkAndHighlight();
+    applyHighlights();
   }
 
   _buildToggle(initialValue, onChange) {
