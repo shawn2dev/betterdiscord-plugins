@@ -2,7 +2,7 @@
  * @name Macro
  * @author Shawny
  * @description Schedule chat messages or slash commands to specific guild/channel at set times (24h).
- * @version 1.0.0
+ * @version 1.0.1
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/Macro.plugin.js
  */
@@ -18,6 +18,7 @@ const _AUTO_UPDATE_INTERVAL_MS = 1000 * 60 * 60;
 
 const DEFAULT_SETTINGS = {
   enabled: true,
+  debug: true,
   slashLeadMs: 1250,
   schedulerTickMs: 200,
   macros: [],
@@ -32,6 +33,7 @@ const REPEAT_MODES = {
 module.exports = class Macro {
   constructor() {
     this.enabled = DEFAULT_SETTINGS.enabled;
+    this.debug = DEFAULT_SETTINGS.debug;
     this.slashLeadMs = DEFAULT_SETTINGS.slashLeadMs;
     this.schedulerTickMs = DEFAULT_SETTINGS.schedulerTickMs;
     this.macros = [];
@@ -49,7 +51,15 @@ module.exports = class Macro {
   }
 
   getVersion() {
-    return '1.0.0';
+    return '1.0.1';
+  }
+
+  _debugLog(message, data) {
+    if (!this.debug) return;
+    try {
+      if (data !== undefined) console.log('[Macro]', message, data);
+      else console.log('[Macro]', message);
+    } catch (_) {}
   }
 
   getAuthor() {
@@ -138,6 +148,7 @@ module.exports = class Macro {
   _save() {
     const data = {
       enabled: this.enabled,
+      debug: this.debug,
       slashLeadMs: this.slashLeadMs,
       schedulerTickMs: this.schedulerTickMs,
       macros: this.macros,
@@ -188,7 +199,7 @@ module.exports = class Macro {
       minute: this._clamp(partial.minute ?? 0, 0, 59),
       second: this._clamp(partial.second ?? 0, 0, 59),
       repeatMode: partial.repeatMode || REPEAT_MODES.DAILY,
-      intervalHours: Math.max(0, Number(partial.intervalHours) || 2),
+      intervalMinutes: this._resolveIntervalMinutes(partial),
       applicationId: partial.applicationId || '',
       slashLeadMs: partial.slashLeadMs ?? null,
       lastRunKey: partial.lastRunKey || '',
@@ -200,6 +211,28 @@ module.exports = class Macro {
     const v = parseInt(n, 10);
     if (Number.isNaN(v)) return min;
     return Math.min(max, Math.max(min, v));
+  }
+
+  _resolveIntervalMinutes(partial) {
+    if (partial.intervalMinutes != null && partial.intervalMinutes !== '') {
+      return Math.max(1, Number(partial.intervalMinutes) || 120);
+    }
+    if (partial.intervalHours != null && partial.intervalHours !== '') {
+      return Math.max(1, (Number(partial.intervalHours) || 2) * 60);
+    }
+    return 120;
+  }
+
+  _formatIntervalLabel(minutes) {
+    if (minutes % 60 === 0 && minutes >= 60) {
+      return `${minutes / 60}시간마다`;
+    }
+    if (minutes >= 60) {
+      const h = Math.floor(minutes / 60);
+      const m = minutes % 60;
+      return m ? `${h}시간 ${m}분마다` : `${h}시간마다`;
+    }
+    return `${minutes}분마다`;
   }
 
   _isSlash(content) {
@@ -251,7 +284,7 @@ module.exports = class Macro {
   }
 
   _getIntervalSlot(macro, now) {
-    const intervalMs = Math.max(1, macro.intervalHours) * 3600000;
+    const intervalMs = Math.max(1, macro.intervalMinutes) * 60000;
     const anchor = this._dateAt(macro.hour, macro.minute, macro.second, now);
     if (now.getTime() < anchor.getTime()) {
       return this._dateAt(
@@ -360,51 +393,183 @@ module.exports = class Macro {
     return store;
   }
 
-  _collectGuildCommands(guildId, channelId) {
-    const store = this._getCommandIndexStore();
-    if (!store) return [];
+  _getCommandAppId(cmd) {
+    if (!cmd) return '';
+    return String(
+      cmd.application_id ?? cmd.applicationId ?? cmd.application?.id ?? '',
+    );
+  }
 
-    const results = [];
+  _normalizeCommand(cmd) {
+    if (!cmd || typeof cmd !== 'object') return null;
+    const id = cmd.id ?? cmd.commandId;
+    const name = cmd.name ?? cmd.commandName;
+    if (!id || !name) return null;
+    return {
+      ...cmd,
+      id: String(id),
+      name: String(name),
+      application_id: this._getCommandAppId(cmd),
+      type: cmd.type ?? 1,
+    };
+  }
+
+  _walkCommandNodes(node, out, depth = 0, visited = new WeakSet()) {
+    if (!node || depth > 8) return;
+
+    if (typeof node === 'object') {
+      if (visited.has(node)) return;
+      visited.add(node);
+    }
+
+    if (Array.isArray(node)) {
+      node.forEach((item) => this._walkCommandNodes(item, out, depth + 1, visited));
+      return;
+    }
+
+    if (typeof node !== 'object') return;
+
+    const normalized = this._normalizeCommand(node);
+    if (normalized) out.push(normalized);
+
+    const nestedKeys = [
+      'commands',
+      'guildCommands',
+      'globalCommands',
+      'contextCommands',
+      'entries',
+      'nodes',
+      'sections',
+      'data',
+      'results',
+    ];
+    nestedKeys.forEach((key) => {
+      if (node[key] != null) this._walkCommandNodes(node[key], out, depth + 1, visited);
+    });
+  }
+
+  _dedupeCommands(commands) {
     const seen = new Set();
+    return commands.filter((cmd) => {
+      const key = `${cmd.application_id}:${cmd.id}:${cmd.name}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
 
-    const pushCmd = (cmd) => {
-      if (!cmd?.id || seen.has(cmd.id)) return;
-      seen.add(cmd.id);
-      results.push(cmd);
+  _summarizeCommands(commands) {
+    return commands.map((cmd) => ({
+      name: cmd.name,
+      id: cmd.id,
+      application_id: cmd.application_id,
+      type: cmd.type,
+      version: cmd.version ?? cmd.version_id ?? null,
+    }));
+  }
+
+  _collectGuildCommands(guildId, channelId, applicationId = '') {
+    const store = this._getCommandIndexStore();
+    const results = [];
+    const sources = [];
+
+    if (!store) {
+      this._debugLog('ApplicationCommandIndexStore 를 찾을 수 없음');
+      return { commands: [], sources, storeFound: false };
+    }
+
+    const pushFrom = (label, node) => {
+      const before = results.length;
+      this._walkCommandNodes(node, results);
+      const added = results.length - before;
+      if (added > 0) sources.push({ label, count: added });
     };
 
-    try {
-      if (typeof store.query === 'function') {
-        const queried = store.query({
-          commandTypes: [1],
-          guildId: guildId || null,
-          channelId: channelId || null,
-        });
-        if (Array.isArray(queried)) queried.forEach(pushCmd);
+    const queryVariants = [
+      { commandTypes: [1], guildId: guildId || null, channelId: channelId || null },
+      { commandTypes: [1], guildId: guildId || null, channelId: channelId || null, includeApplications: true },
+      { commandTypes: [1], guildId: guildId || null },
+      { commandTypes: [1], channelId: channelId || null },
+      { commandTypes: [1] },
+    ];
+
+    queryVariants.forEach((params, i) => {
+      try {
+        if (typeof store.query !== 'function') return;
+        const queried = store.query(params);
+        pushFrom(`query#${i}`, queried);
+      } catch (err) {
+        this._debugLog(`query#${i} 실패`, err?.message || err);
       }
-    } catch (_) {}
+    });
 
     try {
-      const guildState = store.getGuildState?.(guildId);
-      if (guildState?.commands) {
-        Object.values(guildState.commands).forEach((entry) => {
-          if (Array.isArray(entry)) entry.forEach(pushCmd);
-          else if (entry && typeof entry === 'object') Object.values(entry).forEach(pushCmd);
-        });
+      if (guildId && typeof store.getGuildState === 'function') {
+        pushFrom('getGuildState', store.getGuildState(guildId));
       }
-    } catch (_) {}
+    } catch (err) {
+      this._debugLog('getGuildState 실패', err?.message || err);
+    }
 
     try {
-      const context = store.getContextState?.(guildId, channelId);
-      if (context?.commands) {
-        Object.values(context.commands).forEach((entry) => {
-          if (Array.isArray(entry)) entry.forEach(pushCmd);
-          else if (entry && typeof entry === 'object') Object.values(entry).forEach(pushCmd);
-        });
+      if (typeof store.getContextState === 'function') {
+        pushFrom('getContextState', store.getContextState(guildId, channelId));
       }
-    } catch (_) {}
+    } catch (err) {
+      this._debugLog('getContextState 실패', err?.message || err);
+    }
 
-    return results;
+    if (applicationId) {
+      try {
+        if (typeof store.getApplicationState === 'function') {
+          pushFrom('getApplicationState', store.getApplicationState(applicationId));
+        }
+      } catch (err) {
+        this._debugLog('getApplicationState 실패', err?.message || err);
+      }
+
+      try {
+        if (typeof store.getApplicationStates === 'function') {
+          const states = store.getApplicationStates();
+          if (states && typeof states === 'object') {
+            Object.entries(states).forEach(([appId, state]) => {
+              if (String(appId) === String(applicationId)) {
+                pushFrom(`getApplicationStates[${appId}]`, state);
+              }
+            });
+          }
+        }
+      } catch (err) {
+        this._debugLog('getApplicationStates 실패', err?.message || err);
+      }
+    }
+
+    try {
+      if (guildId && typeof store.getGuildState === 'function') {
+        const guildState = store.getGuildState(guildId);
+        if (guildState?.commands && typeof guildState.commands === 'object') {
+          Object.entries(guildState.commands).forEach(([appId, entry]) => {
+            if (!applicationId || String(appId) === String(applicationId)) {
+              pushFrom(`guildState.commands[${appId}]`, entry);
+            }
+          });
+        }
+      }
+    } catch (err) {
+      this._debugLog('guildState.commands 순회 실패', err?.message || err);
+    }
+
+    const commands = this._dedupeCommands(results);
+    this._debugLog('명령어 수집 완료', {
+      guildId,
+      channelId,
+      applicationId: applicationId || null,
+      total: commands.length,
+      sources,
+      sample: this._summarizeCommands(commands).slice(0, 20),
+    });
+
+    return { commands, sources, storeFound: true };
   }
 
   _parseSlashParts(content) {
@@ -417,19 +582,57 @@ module.exports = class Macro {
   }
 
   _findSlashCommand(commands, parts, applicationId) {
-    if (!parts.length) return null;
+    if (!parts.length) {
+      return { command: null, debug: { reason: 'empty parts' } };
+    }
 
-    let candidates = commands.filter((cmd) => cmd.name === parts[0]);
+    const rootName = parts[0];
+    const nameMatches = commands.filter((cmd) => cmd.name === rootName);
+    const appIdsInCache = [...new Set(commands.map((c) => c.application_id).filter(Boolean))];
+
+    let candidates = nameMatches;
     if (applicationId) {
-      candidates = candidates.filter(
-        (cmd) => String(cmd.application_id || cmd.applicationId) === String(applicationId),
+      candidates = nameMatches.filter(
+        (cmd) => String(cmd.application_id) === String(applicationId),
       );
     }
-    if (!candidates.length) return null;
-    if (candidates.length === 1) return candidates[0];
 
-    if (applicationId) return candidates[0];
-    return candidates.sort((a, b) => (a.guild_id ? -1 : 1))[0];
+    const debug = {
+      rootName,
+      requestedApplicationId: applicationId || null,
+      totalCommands: commands.length,
+      nameMatches: this._summarizeCommands(nameMatches),
+      appFilteredMatches: this._summarizeCommands(candidates),
+      applicationIdsInCache: appIdsInCache,
+    };
+
+    if (!nameMatches.length) {
+      debug.reason = 'no command with matching name';
+      return { command: null, debug };
+    }
+
+    if (applicationId && !candidates.length) {
+      debug.reason = 'name matched but application_id did not';
+      debug.closestByApp = this._summarizeCommands(
+        commands.filter((cmd) => String(cmd.application_id) === String(applicationId)),
+      );
+      return { command: null, debug };
+    }
+
+    if (!candidates.length) {
+      debug.reason = 'no candidates after filtering';
+      return { command: null, debug };
+    }
+
+    if (candidates.length === 1) {
+      return { command: candidates[0], debug };
+    }
+
+    const chosen = applicationId
+      ? candidates[0]
+      : candidates.sort((a, b) => (a.guild_id ? -1 : 1))[0];
+    debug.chosenFromDuplicates = this._summarizeCommands(candidates);
+    return { command: chosen, debug };
   }
 
   _buildCommandOptions(command, parts) {
@@ -485,20 +688,64 @@ module.exports = class Macro {
     const parts = this._parseSlashParts(macro.content);
     if (!parts.length) throw new Error('슬래시 명령어 형식이 올바르지 않습니다.');
 
-    const commands = this._collectGuildCommands(macro.guildId, macro.channelId);
-    const command = this._findSlashCommand(commands, parts, macro.applicationId);
+    this._debugLog('슬래시 실행 시작', {
+      macro: macro.name,
+      content: macro.content,
+      parts,
+      guildId: macro.guildId,
+      channelId: macro.channelId,
+      applicationId: macro.applicationId || null,
+    });
+
+    const collected = this._collectGuildCommands(
+      macro.guildId,
+      macro.channelId,
+      macro.applicationId,
+    );
+    const { command, debug } = this._findSlashCommand(
+      collected.commands,
+      parts,
+      macro.applicationId,
+    );
+
     if (!command) {
+      console.warn('[Macro] 슬래시 명령어를 찾지 못함', {
+        macro: macro.name,
+        content: macro.content,
+        guildId: macro.guildId,
+        channelId: macro.channelId,
+        applicationId: macro.applicationId || null,
+        storeFound: collected.storeFound,
+        sources: collected.sources,
+        lookup: debug,
+      });
+      const appHint =
+        debug.applicationIdsInCache?.length > 0
+          ? ` 캐시된 app ID: ${debug.applicationIdsInCache.join(', ')}`
+          : ' 캐시된 명령어가 없습니다 — 해당 채널에서 /명령어를 한 번 수동 실행하세요.';
       throw new Error(
-        `명령어 "/${parts[0]}" 를 찾을 수 없습니다. 채널에서 한 번 수동 실행해 캐시를 채우거나 application ID를 지정하세요.`,
+        `명령어 "/${parts[0]}" 를 찾을 수 없습니다.${appHint} (콘솔에서 [Macro] 로그 확인)`,
       );
     }
 
-    const sessionId = this._getSessionId();
-    if (!sessionId) throw new Error('session_id 를 가져올 수 없습니다.');
+    this._debugLog('슬래시 명령어 선택됨', {
+      name: command.name,
+      id: command.id,
+      application_id: command.application_id,
+      version: command.version ?? command.version_id,
+      lookup: debug,
+    });
 
+    const sessionId = this._getSessionId();
+    if (!sessionId) {
+      console.warn('[Macro] session_id 없음');
+      throw new Error('session_id 를 가져올 수 없습니다.');
+    }
+
+    const options = this._buildCommandOptions(command, parts);
     const payload = {
       type: 2,
-      application_id: String(command.application_id || command.applicationId),
+      application_id: String(command.application_id || macro.applicationId),
       guild_id: macro.guildId || null,
       channel_id: String(macro.channelId),
       session_id: sessionId,
@@ -507,13 +754,18 @@ module.exports = class Macro {
         id: String(command.id),
         name: command.name,
         type: command.type ?? 1,
-        options: this._buildCommandOptions(command, parts),
+        options,
       },
       nonce: this._generateNonce(),
     };
 
+    this._debugLog('interaction payload', payload);
+
     const http = this._getHttpModule();
-    if (!http?.post) throw new Error('HTTP post 모듈을 찾을 수 없습니다.');
+    if (!http?.post) {
+      console.warn('[Macro] HTTP post 모듈 없음', { http: !!http });
+      throw new Error('HTTP post 모듈을 찾을 수 없습니다.');
+    }
 
     const attempts = [
       () => http.post({ url: '/interactions', body: payload }),
@@ -522,12 +774,14 @@ module.exports = class Macro {
     ];
 
     let lastErr = null;
-    for (const attempt of attempts) {
+    for (let i = 0; i < attempts.length; i += 1) {
       try {
-        await Promise.resolve(attempt());
+        await Promise.resolve(attempts[i]());
+        this._debugLog(`슬래시 전송 성공 (attempt ${i + 1})`);
         return;
       } catch (err) {
         lastErr = err;
+        console.warn(`[Macro] 슬래시 전송 attempt ${i + 1} 실패`, err);
       }
     }
     throw lastErr || new Error('슬래시 명령어 전송 실패');
@@ -888,7 +1142,7 @@ module.exports = class Macro {
     });
     [
       ['daily', '매일 (같은 시각)'],
-      ['interval', '간격 반복 (N시간마다)'],
+      ['interval', '간격 반복 (N분마다)'],
       ['once', '한 번만'],
     ].forEach(([value, label]) => {
       const opt = document.createElement('option');
@@ -898,13 +1152,13 @@ module.exports = class Macro {
     });
     repeatSelect.value = macro.repeatMode;
 
-    const intervalInput = this._numberInput(macro.intervalHours, 1, 168);
+    const intervalInput = this._numberInput(macro.intervalMinutes, 1, 10080);
     const intervalWrap = Object.assign(document.createElement('div'), {
       style: 'display:flex;flex-direction:column;gap:4px;',
     });
     const intervalLabel = Object.assign(document.createElement('div'), {
       style: 'font-size:11px;color:var(--text-muted);',
-      textContent: '반복 간격 (시간)',
+      textContent: '반복 간격 (분)',
     });
     intervalWrap.append(intervalLabel, intervalInput);
 
@@ -938,15 +1192,55 @@ module.exports = class Macro {
         minute: minuteInput.value,
         second: secondInput.value,
         repeatMode: repeatSelect.value,
-        intervalHours: intervalInput.value,
+        intervalMinutes: intervalInput.value,
         applicationId: appIdInput.value.trim(),
       });
       try {
         await this._executeMacro(draft);
         this._toast(`테스트 성공: ${draft.name}`, { type: 'success' });
       } catch (err) {
+        console.warn('[Macro] 테스트 실패', err);
         this._toast(`테스트 실패: ${err?.message || err}`, { type: 'error' });
       }
+    });
+
+    const debugBtn = this._btn('명령어 캐시 확인');
+    debugBtn.addEventListener('click', () => {
+      const draft = this._createMacro({
+        ...macro,
+        guildId: guildInput.value.trim(),
+        channelId: channelInput.value.trim(),
+        content: contentInput.value,
+        applicationId: appIdInput.value.trim(),
+      });
+      const parts = this._parseSlashParts(draft.content);
+      const collected = this._collectGuildCommands(
+        draft.guildId,
+        draft.channelId,
+        draft.applicationId,
+      );
+      const { command, debug } = this._findSlashCommand(
+        collected.commands,
+        parts,
+        draft.applicationId,
+      );
+      console.group('[Macro] 명령어 캐시 확인');
+      console.log('macro', draft.name);
+      console.log('guildId', draft.guildId, 'channelId', draft.channelId);
+      console.log('applicationId', draft.applicationId || '(미지정)');
+      console.log('content', draft.content, 'parts', parts);
+      console.log('storeFound', collected.storeFound, 'sources', collected.sources);
+      console.log('totalCommands', collected.commands.length);
+      console.log('allCommands', this._summarizeCommands(collected.commands));
+      console.log('lookup', debug);
+      console.log('resolved', command ? this._summarizeCommands([command])[0] : null);
+      console.groupEnd();
+      this._toast(
+        command
+          ? `명령어 찾음: /${command.name} (${command.application_id})`
+          : `명령어 없음 — 콘솔 확인 (${collected.commands.length}개 캐시됨)`,
+        { type: command ? 'success' : 'warning' },
+      );
     });
 
     const actionRow = Object.assign(document.createElement('div'), {
@@ -967,14 +1261,14 @@ module.exports = class Macro {
           minute: minuteInput.value,
           second: secondInput.value,
           repeatMode: repeatSelect.value,
-          intervalHours: intervalInput.value,
+          intervalMinutes: intervalInput.value,
           applicationId: appIdInput.value.trim(),
           lastRunKey: macro.lastRunKey,
           completed: macro.completed,
         }),
       );
     });
-    actionRow.append(testBtn, useCurrentBtn, cancelBtn, saveBtn);
+    actionRow.append(testBtn, debugBtn, useCurrentBtn, cancelBtn, saveBtn);
 
     wrap.append(
       title,
@@ -1040,7 +1334,7 @@ module.exports = class Macro {
         macro.repeatMode === REPEAT_MODES.ONCE
           ? '1회'
           : macro.repeatMode === REPEAT_MODES.INTERVAL
-            ? `${macro.intervalHours}시간마다`
+            ? this._formatIntervalLabel(macro.intervalMinutes)
             : '매일';
       info.innerHTML = `
         <div style="font-size:13px;font-weight:600;color:var(--header-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${macro.name}${macro.completed ? ' (완료)' : ''}</div>
@@ -1112,6 +1406,22 @@ module.exports = class Macro {
       });
       headerRow.append(headerText, masterToggle);
 
+      const debugRow = Object.assign(document.createElement('div'), {
+        style: 'display:flex;align-items:center;justify-content:space-between;',
+      });
+      const debugLabel = Object.assign(document.createElement('div'), {
+        innerHTML: `
+          <div style="font-size:14px;font-weight:600;color:var(--header-primary);">디버그 로그</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">콘솔(F12)에 [Macro] 로그 출력</div>
+        `,
+      });
+      const debugToggle = this._buildToggle(this.debug, (v) => {
+        this.debug = v;
+        this._save();
+        this._toast(v ? '디버그 로그 켜짐' : '디버그 로그 꺼짐', { type: 'info' });
+      });
+      debugRow.append(debugLabel, debugToggle);
+
       const leadWrap = Object.assign(document.createElement('div'), {
         style: 'display:flex;flex-direction:column;gap:6px;',
       });
@@ -1182,7 +1492,7 @@ module.exports = class Macro {
       });
 
       this._renderMacroList(listEl, editorEl, render);
-      root.append(headerRow, leadWrap, listTitle, listEl, editorEl, addBtn, note, updateRow);
+      root.append(headerRow, debugRow, leadWrap, listTitle, listEl, editorEl, addBtn, note, updateRow);
     };
 
     render();
@@ -1193,6 +1503,7 @@ module.exports = class Macro {
     const saved = this._load();
     if (saved) {
       this.enabled = saved.enabled ?? DEFAULT_SETTINGS.enabled;
+      this.debug = saved.debug ?? DEFAULT_SETTINGS.debug;
       this.slashLeadMs = saved.slashLeadMs ?? DEFAULT_SETTINGS.slashLeadMs;
       this.schedulerTickMs = saved.schedulerTickMs ?? DEFAULT_SETTINGS.schedulerTickMs;
       this.macros = Array.isArray(saved.macros)
