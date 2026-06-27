@@ -2,7 +2,7 @@
  * @name Macro
  * @author Shawny
  * @description Schedule chat messages or slash commands to specific guild/channel at set times (24h).
- * @version 1.0.2
+ * @version 1.0.3
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/Macro.plugin.js
  */
@@ -42,6 +42,8 @@ module.exports = class Macro {
     this._moduleCache = {};
     this._interactionPatched = false;
     this._commandCache = {};
+    this._lastSessionId = '';
+    this._sessionIdSource = '';
   }
 
   getName() {
@@ -53,7 +55,7 @@ module.exports = class Macro {
   }
 
   getVersion() {
-    return '1.0.2';
+    return '1.0.3';
   }
 
   _debugLog(message, data) {
@@ -369,21 +371,192 @@ module.exports = class Macro {
   }
 
   _getSessionId() {
-    if (this._moduleCache.sessionIdFn) {
-      try {
-        return this._moduleCache.sessionIdFn();
-      } catch (_) {}
+    if (this._lastSessionId) return this._lastSessionId;
+
+    const fromWebpack = this._findSessionIdFromWebpack();
+    if (fromWebpack) {
+      this._rememberSessionId(fromWebpack, 'webpack');
+      return fromWebpack;
     }
-    const mod =
-      BdApi.Webpack.getByKeys?.('getSessionId') ||
-      this._findModule((m) => typeof m?.getSessionId === 'function');
-    if (mod?.getSessionId) {
-      this._moduleCache.sessionIdFn = () => mod.getSessionId();
-      try {
-        return mod.getSessionId();
-      } catch (_) {}
+
+    const fromCache = this._getSessionIdFromInteractionCache();
+    if (fromCache) {
+      this._rememberSessionId(fromCache, 'interactionCache');
+      return fromCache;
+    }
+
+    const generated = this._generateSessionId();
+    this._rememberSessionId(generated, 'generated');
+    this._debugLog('session_id 생성 fallback 사용', `${generated.slice(0, 8)}...`);
+    return generated;
+  }
+
+  _rememberSessionId(sessionId, source) {
+    if (!sessionId) return;
+    this._lastSessionId = String(sessionId);
+    this._sessionIdSource = source || '';
+    try {
+      BdApi.saveData('Macro', 'lastSessionId', {
+        id: this._lastSessionId,
+        source: this._sessionIdSource,
+        at: Date.now(),
+      });
+    } catch (_) {}
+  }
+
+  _loadLastSessionId() {
+    try {
+      const saved = BdApi.loadData('Macro', 'lastSessionId');
+      if (saved?.id) {
+        this._lastSessionId = String(saved.id);
+        this._sessionIdSource = saved.source || 'saved';
+      }
+    } catch (_) {}
+  }
+
+  _getSessionIdFromInteractionCache() {
+    let newest = null;
+    Object.values(this._commandCache).forEach((entry) => {
+      const sid = entry?.interaction?.session_id || entry?.sessionId;
+      const at = entry?.cachedAt || 0;
+      if (sid && (!newest || at > newest.at)) {
+        newest = { id: String(sid), at };
+      }
+    });
+    return newest?.id || null;
+  }
+
+  _tryCallSessionId(fn, label) {
+    try {
+      const id = fn();
+      if (typeof id === 'string' && id.length >= 8) {
+        this._debugLog(`session_id 획득 (${label})`, `${id.slice(0, 8)}...`);
+        return id;
+      }
+    } catch (err) {
+      this._debugLog(`session_id 시도 실패 (${label})`, err?.message || err);
     }
     return null;
+  }
+
+  _findSessionIdFromWebpack() {
+    const attempts = [];
+
+    try {
+      const byKeys = BdApi.Webpack.getByKeys?.('getSessionId');
+      if (byKeys) {
+        if (typeof byKeys.getSessionId === 'function') {
+          attempts.push(() => byKeys.getSessionId());
+        }
+        if (typeof byKeys === 'function') {
+          attempts.push(() => byKeys());
+        }
+        if (typeof byKeys.default?.getSessionId === 'function') {
+          attempts.push(() => byKeys.default.getSessionId());
+        }
+      }
+    } catch (_) {}
+
+    try {
+      const mod = this._findModule((m) => typeof m?.getSessionId === 'function');
+      if (mod?.getSessionId) attempts.push(() => mod.getSessionId());
+    } catch (_) {}
+
+    try {
+      const mods =
+        BdApi.Webpack.getModules?.(
+          (m) => typeof m?.default?.getSessionId === 'function',
+          { searchExports: true },
+        ) ?? [];
+      mods.slice(0, 6).forEach((mod) => {
+        attempts.push(() => mod.default.getSessionId());
+      });
+    } catch (_) {}
+
+    try {
+      const F = BdApi.Webpack.Filters;
+      if (F?.byStrings) {
+        const mods =
+          BdApi.Webpack.getModules?.(F.byStrings('getSessionId'), {
+            searchExports: true,
+          }) ?? [];
+        mods.slice(0, 8).forEach((mod) => {
+          if (typeof mod?.getSessionId === 'function') {
+            attempts.push(() => mod.getSessionId());
+          }
+          if (typeof mod?.default?.getSessionId === 'function') {
+            attempts.push(() => mod.default.getSessionId());
+          }
+        });
+      }
+    } catch (_) {}
+
+    try {
+      const authStore =
+        this._getStore('AuthSessionsStore') ||
+        this._findModule((m) => typeof m?.getRemoteSessionId === 'function');
+      if (authStore?.getRemoteSessionId) {
+        attempts.push(() => authStore.getRemoteSessionId());
+      }
+    } catch (_) {}
+
+    try {
+      const sessionsStore =
+        this._getStore('SessionsStore') ||
+        this._findModule(
+          (m) => typeof m?.getSession === 'function' && typeof m?.getActiveSession === 'function',
+        );
+      if (sessionsStore?.getActiveSession) {
+        attempts.push(() => {
+          const active = sessionsStore.getActiveSession();
+          return active?.session_id || active?.sessionId || active?.id;
+        });
+      }
+      if (sessionsStore?.getSession) {
+        attempts.push(() => {
+          const session = sessionsStore.getSession();
+          return session?.session_id || session?.sessionId || session?.id;
+        });
+      }
+    } catch (_) {}
+
+    for (let i = 0; i < attempts.length; i += 1) {
+      const id = this._tryCallSessionId(attempts[i], `attempt-${i + 1}`);
+      if (id) return id;
+    }
+
+    return null;
+  }
+
+  _generateSessionId() {
+    try {
+      const cryptoObj = globalThis.crypto || globalThis.msCrypto;
+      if (cryptoObj?.randomUUID) {
+        return cryptoObj.randomUUID().replace(/-/g, '');
+      }
+      if (cryptoObj?.getRandomValues) {
+        const bytes = new Uint8Array(16);
+        cryptoObj.getRandomValues(bytes);
+        return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+      }
+    } catch (_) {}
+
+    return '10000000100040008000100000000000'.replace(/[018]/g, (character) =>
+      (
+        Number(character) ^
+        ((Math.random() * 16) >> (Number(character) / 4))
+      ).toString(16),
+    );
+  }
+
+  _getCachedInteraction(guildId, channelId, applicationId, commandName) {
+    const key = this._cacheKey(
+      guildId || 'dm',
+      channelId,
+      applicationId,
+      commandName,
+    );
+    return this._commandCache[key]?.interaction || null;
   }
 
   _sleep(ms) {
@@ -634,10 +807,22 @@ module.exports = class Macro {
     const key = this._cacheKey(guildId, channelId, command.application_id, command.name);
     this._commandCache[key] = {
       command,
+      interaction: {
+        type: body.type,
+        application_id: String(body.application_id),
+        guild_id: body.guild_id ?? null,
+        channel_id: String(channelId),
+        session_id: body.session_id ? String(body.session_id) : undefined,
+        data: body.data,
+      },
+      sessionId: body.session_id ? String(body.session_id) : undefined,
       cachedAt: Date.now(),
       guildId,
       channelId,
     };
+    if (body.session_id) {
+      this._rememberSessionId(body.session_id, 'capturedInteraction');
+    }
     this._saveCommandCache();
     this._debugLog('interaction 캐시 저장', { key, command: this._summarizeCommands([command])[0] });
   }
@@ -1062,28 +1247,51 @@ module.exports = class Macro {
     });
 
     const sessionId = this._getSessionId();
-    if (!sessionId) {
-      console.warn('[Macro] session_id 없음');
-      throw new Error('session_id 를 가져올 수 없습니다.');
-    }
+    this._debugLog('session_id 사용', {
+      source: this._sessionIdSource || 'unknown',
+      preview: `${sessionId.slice(0, 8)}...`,
+    });
 
-    const options = this._buildCommandOptions(command, parts);
-    const root = command.rootCommand || command;
-    const payload = {
-      type: 2,
-      application_id: String(command.application_id || macro.applicationId),
-      guild_id: macro.guildId || null,
-      channel_id: String(macro.channelId),
-      session_id: sessionId,
-      data: {
-        version: String(command.version ?? root.version ?? '1'),
-        id: String(root.id || command.id),
-        name: String(root.name || command.name),
-        type: root.type ?? command.type ?? 1,
-        options,
-      },
-      nonce: this._generateNonce(),
-    };
+    const cachedInteraction = this._getCachedInteraction(
+      macro.guildId,
+      macro.channelId,
+      command.application_id || macro.applicationId,
+      command.name,
+    );
+
+    let payload;
+    if (cachedInteraction) {
+      payload = {
+        ...cachedInteraction,
+        guild_id: macro.guildId || cachedInteraction.guild_id || null,
+        channel_id: String(macro.channelId),
+        session_id: sessionId,
+        nonce: this._generateNonce(),
+        data: {
+          ...cachedInteraction.data,
+          options: this._buildCommandOptions(command, parts),
+        },
+      };
+      this._debugLog('캐시된 interaction 템플릿 사용', payload);
+    } else {
+      const options = this._buildCommandOptions(command, parts);
+      const root = command.rootCommand || command;
+      payload = {
+        type: 2,
+        application_id: String(command.application_id || macro.applicationId),
+        guild_id: macro.guildId || null,
+        channel_id: String(macro.channelId),
+        session_id: sessionId,
+        data: {
+          version: String(command.version ?? root.version ?? '1'),
+          id: String(root.id || command.id),
+          name: String(root.name || command.name),
+          type: root.type ?? command.type ?? 1,
+          options,
+        },
+        nonce: this._generateNonce(),
+      };
+    }
 
     this._debugLog('interaction payload', payload);
 
@@ -1561,6 +1769,7 @@ module.exports = class Macro {
       console.log('totalCommands', collected.commands.length);
       console.log('allCommands', this._summarizeCommands(collected.commands));
       console.log('interactionCacheKeys', Object.keys(this._commandCache));
+      console.log('sessionId', this._getSessionId(), 'source', this._sessionIdSource);
       console.log('lookup', debug);
       console.log('resolved', command ? this._summarizeCommands([command])[0] : null);
       console.groupEnd();
@@ -1830,6 +2039,7 @@ module.exports = class Macro {
 
   start() {
     this._loadCommandCache();
+    this._loadLastSessionId();
     const saved = this._load();
     if (saved) {
       this.enabled = saved.enabled ?? DEFAULT_SETTINGS.enabled;
