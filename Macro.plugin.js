@@ -2,7 +2,7 @@
  * @name Macro
  * @author Shawny
  * @description Schedule chat messages or slash commands to specific guild/channel at set times (24h).
- * @version 1.0.1
+ * @version 1.0.2
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/Macro.plugin.js
  */
@@ -40,6 +40,8 @@ module.exports = class Macro {
     this._schedulerTimer = null;
     this._autoUpdateInterval = null;
     this._moduleCache = {};
+    this._interactionPatched = false;
+    this._commandCache = {};
   }
 
   getName() {
@@ -51,7 +53,7 @@ module.exports = class Macro {
   }
 
   getVersion() {
-    return '1.0.1';
+    return '1.0.2';
   }
 
   _debugLog(message, data) {
@@ -384,11 +386,55 @@ module.exports = class Macro {
     return null;
   }
 
+  _sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  _loadCommandCache() {
+    try {
+      const saved = BdApi.loadData('Macro', 'commandCache');
+      if (saved && typeof saved === 'object') this._commandCache = saved;
+    } catch (_) {}
+  }
+
+  _saveCommandCache() {
+    try {
+      BdApi.saveData('Macro', 'commandCache', this._commandCache);
+    } catch (_) {}
+  }
+
+  _cacheKey(guildId, channelId, applicationId, commandName) {
+    return `${guildId || 'dm'}:${channelId}:${applicationId}:${commandName}`;
+  }
+
+  _getChannelStore() {
+    if (this._moduleCache.channelStore) return this._moduleCache.channelStore;
+    const store =
+      this._getStore('ChannelStore') ||
+      this._findModuleWithProps('getChannel', 'getDMFromUserId');
+    this._moduleCache.channelStore = store;
+    return store;
+  }
+
+  _getChannel(channelId) {
+    if (!channelId) return null;
+    try {
+      return this._getChannelStore()?.getChannel?.(channelId) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   _getCommandIndexStore() {
     if (this._moduleCache.commandIndex) return this._moduleCache.commandIndex;
     const store =
       this._getStore('ApplicationCommandIndexStore') ||
-      this._findModule((m) => typeof m?.query === 'function' && typeof m?.getGuildState === 'function');
+      this._findModule(
+        (m) =>
+          m?.indices != null &&
+          typeof m.query === 'function' &&
+          typeof m.getGuildState === 'function',
+      );
     this._moduleCache.commandIndex = store;
     return store;
   }
@@ -396,56 +442,302 @@ module.exports = class Macro {
   _getCommandAppId(cmd) {
     if (!cmd) return '';
     return String(
-      cmd.application_id ?? cmd.applicationId ?? cmd.application?.id ?? '',
+      cmd.application_id ??
+        cmd.applicationId ??
+        cmd.application?.id ??
+        cmd.rootCommand?.application_id ??
+        '',
     );
+  }
+
+  _getCommandNames(cmd) {
+    if (!cmd) return [];
+    return [
+      cmd.name,
+      cmd.untranslatedName,
+      cmd.displayName,
+      cmd.rootCommand?.name,
+    ]
+      .filter(Boolean)
+      .map(String);
+  }
+
+  _commandMatchesName(cmd, token) {
+    return this._getCommandNames(cmd).includes(String(token));
   }
 
   _normalizeCommand(cmd) {
     if (!cmd || typeof cmd !== 'object') return null;
-    const id = cmd.id ?? cmd.commandId;
-    const name = cmd.name ?? cmd.commandName;
+
+    if (cmd.application_id && cmd.name && cmd.id && !cmd.untranslatedName) {
+      return {
+        ...cmd,
+        id: String(cmd.id),
+        name: String(cmd.name),
+        application_id: String(cmd.application_id),
+        version: cmd.version,
+        options: cmd.options || [],
+        _source: 'raw',
+      };
+    }
+
+    const root = cmd.rootCommand;
+    const names = this._getCommandNames(cmd);
+    const name = names[0];
+    const id = root?.id || cmd.id;
     if (!id || !name) return null;
+
     return {
       ...cmd,
       id: String(id),
       name: String(name),
       application_id: this._getCommandAppId(cmd),
-      type: cmd.type ?? 1,
+      version: cmd.version ?? root?.version,
+      options: root?.options || cmd.options || [],
+      subCommandPath: cmd.subCommandPath,
+      rootCommand: root,
+      _source: 'processed',
     };
   }
 
-  _walkCommandNodes(node, out, depth = 0, visited = new WeakSet()) {
-    if (!node || depth > 8) return;
-
-    if (typeof node === 'object') {
-      if (visited.has(node)) return;
-      visited.add(node);
-    }
-
-    if (Array.isArray(node)) {
-      node.forEach((item) => this._walkCommandNodes(item, out, depth + 1, visited));
-      return;
-    }
-
-    if (typeof node !== 'object') return;
-
-    const normalized = this._normalizeCommand(node);
-    if (normalized) out.push(normalized);
-
-    const nestedKeys = [
-      'commands',
-      'guildCommands',
-      'globalCommands',
-      'contextCommands',
-      'entries',
-      'nodes',
-      'sections',
-      'data',
-      'results',
-    ];
-    nestedKeys.forEach((key) => {
-      if (node[key] != null) this._walkCommandNodes(node[key], out, depth + 1, visited);
+  _extractCommandsFromIndexState(state) {
+    const results = [];
+    if (!state?.result?.sections) return results;
+    Object.values(state.result.sections).forEach((section) => {
+      if (!section?.commands) return;
+      Object.values(section.commands).forEach((cmd) => {
+        const normalized = this._normalizeCommand(cmd);
+        if (normalized) results.push(normalized);
+      });
     });
+    return results;
+  }
+
+  _extractCommandsFromApiBody(body) {
+    const results = [];
+    if (!body || typeof body !== 'object') return results;
+
+    if (Array.isArray(body.application_commands)) {
+      body.application_commands.forEach((cmd) => {
+        const normalized = this._normalizeCommand(cmd);
+        if (normalized) results.push(normalized);
+      });
+    }
+
+    if (body.sections && typeof body.sections === 'object') {
+      Object.values(body.sections).forEach((section) => {
+        if (section?.commands) {
+          Object.values(section.commands).forEach((cmd) => {
+            const normalized = this._normalizeCommand(cmd);
+            if (normalized) results.push(normalized);
+          });
+        }
+      });
+    }
+
+    return results;
+  }
+
+  _getCachedCommands(guildId, channelId, applicationId) {
+    return Object.entries(this._commandCache)
+      .filter(([key]) => {
+        const parts = key.split(':');
+        const keyGuild = parts[0];
+        const keyChannel = parts[1];
+        const keyApp = parts[2];
+        if (channelId && keyChannel !== channelId) return false;
+        if (guildId && keyGuild !== guildId && keyGuild !== 'dm') return false;
+        if (applicationId && keyApp !== String(applicationId)) return false;
+        return true;
+      })
+      .map(([, entry]) => entry?.command)
+      .filter(Boolean)
+      .map((cmd) => this._normalizeCommand(cmd))
+      .filter(Boolean);
+  }
+
+  async _fetchCommandsFromRest(guildId, channelId) {
+    const http = this._getHttpModule();
+    if (!http?.get) return [];
+
+    const urls = [];
+    if (channelId) urls.push(`/channels/${channelId}/application-command-index`);
+    if (guildId) urls.push(`/guilds/${guildId}/application-command-index`);
+
+    const results = [];
+    for (const url of urls) {
+      const getAttempts = [
+        () => http.get({ url }),
+        () => http.get(url),
+      ];
+      for (const attempt of getAttempts) {
+        try {
+          const res = await Promise.resolve(attempt());
+          const body = res?.body ?? res?.data ?? res;
+          const extracted = this._extractCommandsFromApiBody(body);
+          if (extracted.length) {
+            this._debugLog('REST 명령어 수집', { url, count: extracted.length });
+            results.push(...extracted);
+            break;
+          }
+        } catch (err) {
+          this._debugLog('REST 명령어 fetch 실패', { url, error: err?.message || err });
+        }
+      }
+    }
+    return results;
+  }
+
+  _readBodySync(body) {
+    if (body == null) return '';
+    if (typeof body === 'string') return body;
+    try {
+      return JSON.stringify(body);
+    } catch (_) {
+      return '';
+    }
+  }
+
+  _extractHttpPostBody(args) {
+    const first = args[0];
+    if (first && typeof first === 'object' && !(first instanceof URL)) {
+      return this._readBodySync(first.body ?? first.data ?? first.json);
+    }
+    const opt = args[1] || {};
+    return this._readBodySync(opt.body ?? opt.data ?? opt.json ?? first);
+  }
+
+  _extractHttpPostUrl(args) {
+    const first = args[0];
+    if (first && typeof first === 'object' && !(first instanceof URL)) {
+      return String(first.url || first.route || first.path || first.endpoint || '');
+    }
+    return String(first ?? args[1]?.url ?? '');
+  }
+
+  _maybeCacheInteractionBody(body) {
+    if (body?.type !== 2 || !body?.data?.name || !body?.application_id) return;
+
+    const guildId = body.guild_id || 'dm';
+    const channelId = body.channel_id;
+    if (!channelId) return;
+
+    const command = {
+      id: String(body.data.id),
+      name: String(body.data.name),
+      application_id: String(body.application_id),
+      version: String(body.data.version ?? '1'),
+      type: body.data.type ?? 1,
+      options: body.data.options || [],
+    };
+
+    const key = this._cacheKey(guildId, channelId, command.application_id, command.name);
+    this._commandCache[key] = {
+      command,
+      cachedAt: Date.now(),
+      guildId,
+      channelId,
+    };
+    this._saveCommandCache();
+    this._debugLog('interaction 캐시 저장', { key, command: this._summarizeCommands([command])[0] });
+  }
+
+  _maybeCacheInteraction(args) {
+    const url = this._extractHttpPostUrl(args);
+    if (!/\/interactions/i.test(url)) return;
+
+    const bodyText = this._extractHttpPostBody(args);
+    if (!bodyText) return;
+
+    try {
+      this._maybeCacheInteractionBody(JSON.parse(bodyText));
+    } catch (_) {}
+  }
+
+  _maybeCacheFetchInteraction(input, init = {}) {
+    const url =
+      typeof Request !== 'undefined' && input instanceof Request
+        ? input.url
+        : String(input?.url ?? input ?? '');
+    if (!/\/interactions/i.test(url)) return;
+
+    let bodyText = '';
+    if (typeof Request !== 'undefined' && input instanceof Request) {
+      try {
+        bodyText = init.body != null ? this._readBodySync(init.body) : '';
+        if (!bodyText) {
+          input.clone().text().then((text) => {
+            try {
+              this._maybeCacheInteractionBody(JSON.parse(text));
+            } catch (_) {}
+          }).catch(() => {});
+          return;
+        }
+      } catch (_) {}
+    } else {
+      bodyText = this._readBodySync(init.body);
+    }
+
+    if (!bodyText) return;
+    try {
+      this._maybeCacheInteractionBody(JSON.parse(bodyText));
+    } catch (_) {}
+  }
+
+  _installInteractionCapture() {
+    if (this._interactionPatched) return;
+
+    let patched = 0;
+    const http = this._getHttpModule();
+    if (http?.post) {
+      try {
+        BdApi.Patcher.after('MacroInteractionCache', http, 'post', (_, args, res) => {
+          try {
+            this._maybeCacheInteraction(args);
+          } catch (err) {
+            console.warn('[Macro] interaction cache failed:', err);
+          }
+          return res;
+        });
+        patched += 1;
+      } catch (err) {
+        console.warn('[Macro] http.post capture 패치 실패:', err);
+      }
+    }
+
+    try {
+      if (typeof window !== 'undefined' && window.fetch) {
+        BdApi.Patcher.before('MacroInteractionCache', window, 'fetch', (_, args) => {
+          try {
+            this._maybeCacheFetchInteraction(args[0], args[1] || {});
+          } catch (err) {
+            console.warn('[Macro] fetch capture failed:', err);
+          }
+        });
+        patched += 1;
+      }
+    } catch (err) {
+      console.warn('[Macro] fetch capture 패치 실패:', err);
+    }
+
+    if (patched > 0) {
+      this._interactionPatched = true;
+      this._debugLog('interaction capture 패치됨', { patched });
+    }
+  }
+
+  _stopInteractionCapture() {
+    if (!this._interactionPatched) return;
+    try {
+      const http = this._getHttpModule();
+      if (http) BdApi.Patcher.unpatch('MacroInteractionCache', http, 'post');
+    } catch (_) {}
+    try {
+      if (typeof window !== 'undefined' && window.fetch) {
+        BdApi.Patcher.unpatch('MacroInteractionCache', window, 'fetch');
+      }
+    } catch (_) {}
+    this._interactionPatched = false;
   }
 
   _dedupeCommands(commands) {
@@ -465,111 +757,144 @@ module.exports = class Macro {
       application_id: cmd.application_id,
       type: cmd.type,
       version: cmd.version ?? cmd.version_id ?? null,
+      source: cmd._source,
     }));
   }
 
-  _collectGuildCommands(guildId, channelId, applicationId = '') {
+  _pushCommandList(results, sources, label, list) {
+    const normalized = (list || [])
+      .map((cmd) => this._normalizeCommand(cmd))
+      .filter(Boolean);
+    if (!normalized.length) return;
+    results.push(...normalized);
+    sources.push({ label, count: normalized.length });
+  }
+
+  async _collectGuildCommands(guildId, channelId, applicationId = '') {
     const store = this._getCommandIndexStore();
+    const channel = this._getChannel(channelId);
     const results = [];
     const sources = [];
 
     if (!store) {
-      this._debugLog('ApplicationCommandIndexStore 를 찾을 수 없음');
-      return { commands: [], sources, storeFound: false };
-    }
-
-    const pushFrom = (label, node) => {
-      const before = results.length;
-      this._walkCommandNodes(node, results);
-      const added = results.length - before;
-      if (added > 0) sources.push({ label, count: added });
-    };
-
-    const queryVariants = [
-      { commandTypes: [1], guildId: guildId || null, channelId: channelId || null },
-      { commandTypes: [1], guildId: guildId || null, channelId: channelId || null, includeApplications: true },
-      { commandTypes: [1], guildId: guildId || null },
-      { commandTypes: [1], channelId: channelId || null },
-      { commandTypes: [1] },
-    ];
-
-    queryVariants.forEach((params, i) => {
-      try {
-        if (typeof store.query !== 'function') return;
-        const queried = store.query(params);
-        pushFrom(`query#${i}`, queried);
-      } catch (err) {
-        this._debugLog(`query#${i} 실패`, err?.message || err);
-      }
-    });
-
-    try {
-      if (guildId && typeof store.getGuildState === 'function') {
-        pushFrom('getGuildState', store.getGuildState(guildId));
-      }
-    } catch (err) {
-      this._debugLog('getGuildState 실패', err?.message || err);
-    }
-
-    try {
-      if (typeof store.getContextState === 'function') {
-        pushFrom('getContextState', store.getContextState(guildId, channelId));
-      }
-    } catch (err) {
-      this._debugLog('getContextState 실패', err?.message || err);
-    }
-
-    if (applicationId) {
-      try {
-        if (typeof store.getApplicationState === 'function') {
-          pushFrom('getApplicationState', store.getApplicationState(applicationId));
+      console.warn('[Macro] ApplicationCommandIndexStore 를 찾을 수 없음');
+    } else {
+      if (guildId) {
+        try {
+          this._pushCommandList(
+            results,
+            sources,
+            'getGuildState',
+            this._extractCommandsFromIndexState(store.getGuildState(guildId)),
+          );
+        } catch (err) {
+          this._debugLog('getGuildState 실패', err?.message || err);
         }
-      } catch (err) {
-        this._debugLog('getApplicationState 실패', err?.message || err);
       }
 
-      try {
-        if (typeof store.getApplicationStates === 'function') {
-          const states = store.getApplicationStates();
-          if (states && typeof states === 'object') {
-            Object.entries(states).forEach(([appId, state]) => {
+      if (channel) {
+        try {
+          this._pushCommandList(
+            results,
+            sources,
+            'getContextState',
+            this._extractCommandsFromIndexState(
+              store.getContextState({ type: 'channel', channel }),
+            ),
+          );
+        } catch (err) {
+          this._debugLog('getContextState 실패', err?.message || err);
+        }
+      }
+
+      if (applicationId) {
+        try {
+          this._pushCommandList(
+            results,
+            sources,
+            'getApplicationState',
+            this._extractCommandsFromIndexState(store.getApplicationState(applicationId)),
+          );
+        } catch (err) {
+          this._debugLog('getApplicationState 실패', err?.message || err);
+        }
+
+        try {
+          if (typeof store.getApplicationStates === 'function') {
+            const states = store.getApplicationStates();
+            const entries =
+              states instanceof Map ? [...states.entries()] : Object.entries(states || {});
+            entries.forEach(([appId, state]) => {
               if (String(appId) === String(applicationId)) {
-                pushFrom(`getApplicationStates[${appId}]`, state);
+                this._pushCommandList(
+                  results,
+                  sources,
+                  `getApplicationStates[${appId}]`,
+                  this._extractCommandsFromIndexState(state),
+                );
               }
             });
           }
+        } catch (err) {
+          this._debugLog('getApplicationStates 실패', err?.message || err);
         }
-      } catch (err) {
-        this._debugLog('getApplicationStates 실패', err?.message || err);
+      }
+
+      if (channel && typeof store.query === 'function') {
+        const runQuery = (label) => {
+          const queryResult = store.query(
+            { type: 'channel', channel },
+            { commandTypes: [1], applicationCommands: true },
+            {
+              allowFetch: true,
+              applicationId: applicationId || undefined,
+            },
+          );
+          this._pushCommandList(results, sources, label, queryResult?.commands);
+          return queryResult;
+        };
+
+        try {
+          let queryResult = runQuery('query');
+          sources.push({ label: 'query.loading', loading: !!queryResult?.loading });
+          if (queryResult?.loading) {
+            await this._sleep(1500);
+            queryResult = runQuery('query.retry');
+            sources.push({ label: 'query.retry.loading', loading: !!queryResult?.loading });
+          }
+        } catch (err) {
+          console.warn('[Macro] store.query 실패', err);
+        }
+      } else if (!channel) {
+        sources.push({ label: 'query.skipped', reason: 'channel not in ChannelStore' });
       }
     }
 
-    try {
-      if (guildId && typeof store.getGuildState === 'function') {
-        const guildState = store.getGuildState(guildId);
-        if (guildState?.commands && typeof guildState.commands === 'object') {
-          Object.entries(guildState.commands).forEach(([appId, entry]) => {
-            if (!applicationId || String(appId) === String(applicationId)) {
-              pushFrom(`guildState.commands[${appId}]`, entry);
-            }
-          });
-        }
-      }
-    } catch (err) {
-      this._debugLog('guildState.commands 순회 실패', err?.message || err);
-    }
+    this._pushCommandList(
+      results,
+      sources,
+      'interactionCache',
+      this._getCachedCommands(guildId, channelId, applicationId),
+    );
+
+    const restCommands = await this._fetchCommandsFromRest(guildId, channelId);
+    this._pushCommandList(results, sources, 'restApi', restCommands);
 
     const commands = this._dedupeCommands(results);
-    this._debugLog('명령어 수집 완료', {
+    const summary = {
       guildId,
       channelId,
       applicationId: applicationId || null,
+      storeFound: !!store,
+      channelFound: !!channel,
       total: commands.length,
       sources,
-      sample: this._summarizeCommands(commands).slice(0, 20),
-    });
+      sample: this._summarizeCommands(commands).slice(0, 30),
+    };
+    this._debugLog('명령어 수집 완료', summary);
+    if (!commands.length) console.warn('[Macro] 명령어 수집 결과 없음', summary);
 
-    return { commands, sources, storeFound: true };
+    return { commands, sources, storeFound: !!store, channelFound: !!channel };
   }
 
   _parseSlashParts(content) {
@@ -587,7 +912,7 @@ module.exports = class Macro {
     }
 
     const rootName = parts[0];
-    const nameMatches = commands.filter((cmd) => cmd.name === rootName);
+    const nameMatches = commands.filter((cmd) => this._commandMatchesName(cmd, rootName));
     const appIdsInCache = [...new Set(commands.map((c) => c.application_id).filter(Boolean))];
 
     let candidates = nameMatches;
@@ -638,7 +963,7 @@ module.exports = class Macro {
   _buildCommandOptions(command, parts) {
     const options = [];
     let idx = 1;
-    let current = command;
+    let current = { options: command.options || command.rootCommand?.options || [] };
 
     while (idx < parts.length) {
       const token = parts[idx];
@@ -697,7 +1022,7 @@ module.exports = class Macro {
       applicationId: macro.applicationId || null,
     });
 
-    const collected = this._collectGuildCommands(
+    const collected = await this._collectGuildCommands(
       macro.guildId,
       macro.channelId,
       macro.applicationId,
@@ -743,6 +1068,7 @@ module.exports = class Macro {
     }
 
     const options = this._buildCommandOptions(command, parts);
+    const root = command.rootCommand || command;
     const payload = {
       type: 2,
       application_id: String(command.application_id || macro.applicationId),
@@ -750,10 +1076,10 @@ module.exports = class Macro {
       channel_id: String(macro.channelId),
       session_id: sessionId,
       data: {
-        version: String(command.version ?? command.version_id ?? '1'),
-        id: String(command.id),
-        name: command.name,
-        type: command.type ?? 1,
+        version: String(command.version ?? root.version ?? '1'),
+        id: String(root.id || command.id),
+        name: String(root.name || command.name),
+        type: root.type ?? command.type ?? 1,
         options,
       },
       nonce: this._generateNonce(),
@@ -1205,7 +1531,7 @@ module.exports = class Macro {
     });
 
     const debugBtn = this._btn('명령어 캐시 확인');
-    debugBtn.addEventListener('click', () => {
+    debugBtn.addEventListener('click', async () => {
       const draft = this._createMacro({
         ...macro,
         guildId: guildInput.value.trim(),
@@ -1214,7 +1540,7 @@ module.exports = class Macro {
         applicationId: appIdInput.value.trim(),
       });
       const parts = this._parseSlashParts(draft.content);
-      const collected = this._collectGuildCommands(
+      const collected = await this._collectGuildCommands(
         draft.guildId,
         draft.channelId,
         draft.applicationId,
@@ -1227,11 +1553,14 @@ module.exports = class Macro {
       console.group('[Macro] 명령어 캐시 확인');
       console.log('macro', draft.name);
       console.log('guildId', draft.guildId, 'channelId', draft.channelId);
+      console.log('channelInStore', !!this._getChannel(draft.channelId));
       console.log('applicationId', draft.applicationId || '(미지정)');
       console.log('content', draft.content, 'parts', parts);
-      console.log('storeFound', collected.storeFound, 'sources', collected.sources);
+      console.log('storeFound', collected.storeFound, 'channelFound', collected.channelFound);
+      console.log('sources', collected.sources);
       console.log('totalCommands', collected.commands.length);
       console.log('allCommands', this._summarizeCommands(collected.commands));
+      console.log('interactionCacheKeys', Object.keys(this._commandCache));
       console.log('lookup', debug);
       console.log('resolved', command ? this._summarizeCommands([command])[0] : null);
       console.groupEnd();
@@ -1488,7 +1817,7 @@ module.exports = class Macro {
         style:
           'padding:8px 12px;border-radius:8px;background:var(--background-secondary);font-size:11px;color:var(--text-muted);line-height:1.45;',
         textContent:
-          '채널 ID는 채널 우클릭 → ID 복사(개발자 모드 필요) 또는 "현재 채널 ID 사용"으로 채울 수 있습니다. 슬래시 명령어는 해당 채널에서 한 번 수동 실행해 두면 자동 인식이 잘 됩니다.',
+          '슬래시 명령어는 해당 채널에서 한 번 수동 실행하면 interaction 캐시에 저장됩니다. "명령어 캐시 확인" 시 sources에 어디서 수집됐는지 표시됩니다. channelInStore가 false면 Discord에서 해당 채널을 한번 열어주세요.',
       });
 
       this._renderMacroList(listEl, editorEl, render);
@@ -1500,6 +1829,7 @@ module.exports = class Macro {
   }
 
   start() {
+    this._loadCommandCache();
     const saved = this._load();
     if (saved) {
       this.enabled = saved.enabled ?? DEFAULT_SETTINGS.enabled;
@@ -1512,6 +1842,7 @@ module.exports = class Macro {
     }
 
     if (this.enabled) this._startScheduler();
+    this._installInteractionCapture();
     this._startAutoUpdateChecks();
 
     this._toast(
@@ -1524,6 +1855,7 @@ module.exports = class Macro {
 
   stop() {
     this._stopScheduler();
+    this._stopInteractionCapture();
     this._stopAutoUpdateChecks();
     this._moduleCache = {};
     this._toast('Macro 중지됨', { type: 'info' });
