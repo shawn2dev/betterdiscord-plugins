@@ -4,9 +4,16 @@
  * @description Add configurable experience commands to the user context menu.
  * @version 1.0.0
  * @source https://github.com/shawn2dev/betterdiscord-plugins
+ * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/XpUserMenu.plugin.js
  */
 
 'use strict';
+
+const UPDATE_REPO = 'shawn2dev/betterdiscord-plugins';
+const UPDATE_BRANCH = 'main';
+const UPDATE_FILENAME = 'XpUserMenu.plugin.js';
+const UPDATE_INITIAL_DELAY_MS = 5000;
+const UPDATE_INTERVAL_MS = 60 * 60 * 1000;
 
 const DEFAULT_SETTINGS = {
   addCommandName: '경험치추가',
@@ -23,6 +30,8 @@ module.exports = class XpUserMenu {
     this._unpatchUserContext = null;
     this._commandCache = new Map();
     this._patchCallback = null;
+    this._autoUpdateInterval = null;
+    this._autoUpdateTimeout = null;
   }
 
   getName() {
@@ -44,9 +53,14 @@ module.exports = class XpUserMenu {
   start() {
     this._loadSettings();
     this._patchContextMenu();
+    this._startAutoUpdateChecks();
   }
 
   stop() {
+    if (this._autoUpdateInterval) clearInterval(this._autoUpdateInterval);
+    if (this._autoUpdateTimeout) clearTimeout(this._autoUpdateTimeout);
+    this._autoUpdateInterval = null;
+    this._autoUpdateTimeout = null;
     try {
       if (typeof this._unpatchUserContext === 'function') {
         this._unpatchUserContext();
@@ -88,6 +102,102 @@ module.exports = class XpUserMenu {
     } catch (_) {}
   }
 
+  _parseVersion(version) {
+    return String(version).split('.').map((part) => Number.parseInt(part, 10) || 0);
+  }
+
+  _isRemoteVersionNewer(remoteVersion, currentVersion) {
+    const remote = this._parseVersion(remoteVersion);
+    const current = this._parseVersion(currentVersion);
+    for (let index = 0; index < Math.max(remote.length, current.length); index += 1) {
+      const remotePart = remote[index] || 0;
+      const currentPart = current[index] || 0;
+      if (remotePart !== currentPart) return remotePart > currentPart;
+    }
+    return false;
+  }
+
+  _extractRemoteVersion(content) {
+    const match = content.match(/@version\s+([0-9]+(?:\.[0-9]+)*)/i);
+    return match?.[1] || null;
+  }
+
+  _nodeRequire(id) {
+    if (typeof globalThis.__non_webpack_require__ === 'function') {
+      return globalThis.__non_webpack_require__(id);
+    }
+    if (typeof globalThis.non_webpack_require === 'function') {
+      return globalThis.non_webpack_require(id);
+    }
+    return require(id);
+  }
+
+  _getPluginFilePath() {
+    const path = this._nodeRequire('path');
+    const addon = BdApi.Plugins.get(this.getName()) || BdApi.Plugins.get(UPDATE_FILENAME);
+    if (addon?.filename && BdApi.Plugins.folder) {
+      return path.join(BdApi.Plugins.folder, addon.filename);
+    }
+    if (typeof __filename !== 'undefined') return __filename;
+    throw new Error('Could not determine plugin file path.');
+  }
+
+  async _fetchLatestPlugin() {
+    const url = `https://raw.githubusercontent.com/${UPDATE_REPO}/refs/heads/${UPDATE_BRANCH}/${UPDATE_FILENAME}?t=${Date.now()}`;
+    const options = {
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+    };
+    const response = BdApi.Net?.fetch
+      ? await BdApi.Net.fetch(url, options)
+      : await fetch(url, options);
+    const status = response.status ?? response.statusCode ?? 0;
+    const ok = typeof response.ok === 'boolean' ? response.ok : status >= 200 && status < 300;
+    if (!ok && status !== 0) throw new Error(`HTTP ${status}`);
+    if (typeof response.text === 'function') return response.text();
+    if (typeof response.body === 'string') return response.body;
+    if (response.content != null) return String(response.content);
+    throw new Error('The update response was empty.');
+  }
+
+  async _checkForUpdates(showToast = false) {
+    try {
+      const content = await this._fetchLatestPlugin();
+      const remoteVersion = this._extractRemoteVersion(content);
+      if (!remoteVersion || !content.includes('module.exports = class XpUserMenu')) {
+        throw new Error('The downloaded plugin did not pass validation.');
+      }
+      if (!this._isRemoteVersionNewer(remoteVersion, this.getVersion())) {
+        if (showToast) this._toast(`XpUserMenu is up to date (v${this.getVersion()}).`, 'info');
+        return;
+      }
+
+      const fs = this._nodeRequire('fs');
+      fs.writeFileSync(this._getPluginFilePath(), content, 'utf8');
+      this._toast(`XpUserMenu v${remoteVersion} installed.`, 'success');
+      BdApi.Plugins.reload(this.getName());
+    } catch (error) {
+      console.warn('[XpUserMenu] Update check failed:', error);
+      if (showToast) this._toast(`Update check failed: ${error?.message || error}`, 'error');
+    }
+  }
+
+  _startAutoUpdateChecks() {
+    this._stopAutoUpdateChecks();
+    this._autoUpdateTimeout = setTimeout(() => {
+      this._autoUpdateTimeout = null;
+      this._checkForUpdates(false);
+    }, UPDATE_INITIAL_DELAY_MS);
+    this._autoUpdateInterval = setInterval(() => this._checkForUpdates(false), UPDATE_INTERVAL_MS);
+  }
+
+  _stopAutoUpdateChecks() {
+    if (this._autoUpdateInterval) clearInterval(this._autoUpdateInterval);
+    if (this._autoUpdateTimeout) clearTimeout(this._autoUpdateTimeout);
+    this._autoUpdateInterval = null;
+    this._autoUpdateTimeout = null;
+  }
+
   _patchContextMenu() {
     if (!BdApi.ContextMenu?.patch || !BdApi.ContextMenu?.buildItem) {
       this._toast('BetterDiscord ContextMenu API is unavailable.', 'error');
@@ -95,14 +205,22 @@ module.exports = class XpUserMenu {
     }
 
     this._patchCallback = (menu, props) => {
-      const userId = props?.user?.id;
-      if (!userId || !menu?.props?.children) return;
+      const userId =
+        props?.user?.id ||
+        props?.member?.user?.id ||
+        props?.userId ||
+        props?.targetUser?.id;
+      if (!userId || !menu?.props) return;
 
       const actions = [
         this._buildXpSubmenu('경험치 추가', 'add', userId),
         this._buildXpSubmenu('경험치 제거', 'remove', userId),
       ];
-      menu.props.children.push(...actions.filter(Boolean));
+      const children = menu.props.children;
+      menu.props.children = [
+        ...(Array.isArray(children) ? children : children == null ? [] : [children]),
+        ...actions.filter(Boolean),
+      ];
     };
 
     try {
@@ -362,6 +480,13 @@ module.exports = class XpUserMenu {
     note.textContent = 'Commands are sent through Discord internal APIs and may stop working after Discord updates.';
     note.style.cssText = 'font-size:12px;line-height:1.4;color:var(--text-muted);';
     root.appendChild(note);
+
+    const updateButton = document.createElement('button');
+    updateButton.type = 'button';
+    updateButton.textContent = 'Check for updates';
+    updateButton.addEventListener('click', () => this._checkForUpdates(true));
+    root.appendChild(updateButton);
+
     renderAmounts();
     return root;
   }
