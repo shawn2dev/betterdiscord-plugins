@@ -33,3 +33,11 @@ https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/main/Macro.plu
 - Repeat modes: once, daily, or every N hours
 - Slash commands fire ~1–1.5s early (configurable ping lead) for bot timing
 - Auto-updates from GitHub (same as ShawnyHelper)
+
+## XpUserMenu
+
+Adds experience add/remove submenus to the Discord user context menu. The default amount presets are 500, 1000, and 2000 XP; presets and localized command names can be edited in plugin settings.
+
+**Install:** Copy `XpUserMenu.plugin.js` into your BetterDiscord plugins folder and enable it.
+
+Commands are sent through Discord's internal interaction API, which is undocumented and may change without notice.
