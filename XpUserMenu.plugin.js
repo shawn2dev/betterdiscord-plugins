@@ -2,7 +2,7 @@
  * @name XpUserMenu
  * @author Shawny
  * @description Add configurable experience commands to the user context menu.
- * @version 1.0.15
+ * @version 1.0.16
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/XpUserMenu.plugin.js
  */
@@ -18,8 +18,8 @@ const UPDATE_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_SETTINGS = {
   addCommandName: '경험치추가',
   removeCommandName: '경험치제거',
-  userOptionName: 'user',
-  amountOptionName: 'exp',
+  userOptionName: '유저',
+  amountOptionName: '경험치',
   debugLogging: true,
   amounts: [500, 1000, 2000],
 };
@@ -42,7 +42,7 @@ module.exports = class XpUserMenu {
   }
 
   getVersion() {
-    return '1.0.15';
+    return '1.0.16';
   }
 
   getDescription() {
@@ -85,6 +85,14 @@ module.exports = class XpUserMenu {
           saved?.removeCommandName === 'removexp'
             ? '경험치제거'
             : saved?.removeCommandName || DEFAULT_SETTINGS.removeCommandName,
+        userOptionName:
+          saved?.userOptionName === 'user'
+            ? '유저'
+            : saved?.userOptionName || DEFAULT_SETTINGS.userOptionName,
+        amountOptionName:
+          saved?.amountOptionName === 'exp'
+            ? '경험치'
+            : saved?.amountOptionName || DEFAULT_SETTINGS.amountOptionName,
         amounts: Array.isArray(saved?.amounts)
           ? [...new Set(saved.amounts.map(Number).filter((value) => Number.isInteger(value) && value > 0))]
           : [...DEFAULT_SETTINGS.amounts],
@@ -324,6 +332,7 @@ module.exports = class XpUserMenu {
       }
 
       this._debugLog('XP command copied to clipboard', { operation, commandName, amount });
+      this._toast('명령어를 클립보드에 복사했어요.', 'success');
     } catch (error) {
       this._debugLog('XP command clipboard copy failed', { operation, error: error?.message || String(error) });
       this._toast(error?.message || 'Could not copy the command.', 'error');
