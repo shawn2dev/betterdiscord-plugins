@@ -2,7 +2,7 @@
  * @name XpUserMenu
  * @author Shawny
  * @description Add configurable experience commands to the user context menu.
- * @version 1.0.13
+ * @version 1.0.14
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/XpUserMenu.plugin.js
  */
@@ -42,7 +42,7 @@ module.exports = class XpUserMenu {
   }
 
   getVersion() {
-    return '1.0.13';
+    return '1.0.14';
   }
 
   getDescription() {
@@ -298,47 +298,35 @@ module.exports = class XpUserMenu {
     };
   }
 
-  _runXpCommand(operation, userId, amount) {
+  async _runXpCommand(operation, userId, amount) {
     try {
       if (!/^\d+$/.test(String(userId))) throw new Error('The selected user ID is invalid.');
       if (!Number.isSafeInteger(Number(amount)) || Number(amount) < 1) {
         throw new Error('The selected experience amount is invalid.');
       }
 
-      const editor = document.querySelector(
-        '[data-slate-editor="true"][contenteditable="true"], [role="textbox"][contenteditable="true"]',
-      );
-      if (!editor) throw new Error('Could not find the Discord message input.');
       const commandName = operation === 'add'
         ? this.settings.addCommandName
         : this.settings.removeCommandName;
       const commandText = `/${commandName} ${this.settings.userOptionName}:<@${userId}> ${this.settings.amountOptionName}:${Number(amount)}`;
 
-      editor.focus();
-      if (typeof DataTransfer !== 'function' || typeof ClipboardEvent !== 'function') {
-        throw new Error('This Discord client does not support inserting a command draft through paste.');
+      if (globalThis.navigator?.clipboard?.writeText) {
+        await globalThis.navigator.clipboard.writeText(commandText);
+      } else {
+        let clipboard;
+        try {
+          clipboard = this._nodeRequire('electron').clipboard;
+        } catch (_) {}
+        if (typeof clipboard?.writeText !== 'function') {
+          throw new Error('Clipboard access is unavailable in this Discord client.');
+        }
+        clipboard.writeText(commandText);
       }
 
-      document.execCommand('selectAll');
-      const clipboardData = new DataTransfer();
-      clipboardData.setData('text/plain', commandText);
-      const pasteEvent = new ClipboardEvent('paste', {
-        bubbles: true,
-        cancelable: true,
-        clipboardData,
-      });
-      editor.dispatchEvent(pasteEvent);
-
-      const editorText = String(editor.innerText ?? editor.textContent ?? '')
-        .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
-      if (!editorText.includes(commandText)) {
-        throw new Error('Could not prepare the command in the message input.');
-      }
-
-      this._debugLog('XP command draft prepared', { operation, commandName, amount });
+      this._debugLog('XP command copied to clipboard', { operation, commandName, amount });
     } catch (error) {
-      this._debugLog('XP command draft preparation failed', { operation, error: error?.message || String(error) });
-      this._toast(error?.message || 'Could not prepare the command.', 'error');
+      this._debugLog('XP command clipboard copy failed', { operation, error: error?.message || String(error) });
+      this._toast(error?.message || 'Could not copy the command.', 'error');
     }
   }
 
@@ -440,7 +428,7 @@ module.exports = class XpUserMenu {
     root.appendChild(amountSection);
 
     const note = document.createElement('div');
-    note.textContent = 'Selecting an amount replaces all current message input text with a command draft. Review and send it manually.';
+    note.textContent = 'Selecting an amount copies the slash command to the clipboard. Paste it into Discord, review, then send it manually.';
     note.style.cssText = 'font-size:12px;line-height:1.4;color:var(--text-muted);';
     root.appendChild(note);
 
