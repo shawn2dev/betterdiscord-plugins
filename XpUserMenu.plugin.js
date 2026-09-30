@@ -2,7 +2,7 @@
  * @name XpUserMenu
  * @author Shawny
  * @description Add configurable experience commands to the user context menu.
- * @version 1.0.5
+ * @version 1.0.7
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/XpUserMenu.plugin.js
  */
@@ -20,6 +20,7 @@ const DEFAULT_SETTINGS = {
   removeCommandName: 'removexp',
   userOptionName: 'user',
   amountOptionName: 'exp',
+  debugLogging: true,
   amounts: [500, 1000, 2000],
 };
 
@@ -43,7 +44,7 @@ module.exports = class XpUserMenu {
   }
 
   getVersion() {
-    return '1.0.5';
+    return '1.0.7';
   }
 
   getDescription() {
@@ -108,6 +109,11 @@ module.exports = class XpUserMenu {
       if (BdApi.UI?.showToast) BdApi.UI.showToast(message, { type });
       else BdApi.showToast?.(message, { type });
     } catch (_) {}
+  }
+
+  _debugLog(event, details = {}) {
+    if (!this.settings.debugLogging) return;
+    console.debug(`[XpUserMenu] ${event}`, details);
   }
 
   _parseVersion(version) {
@@ -318,14 +324,18 @@ module.exports = class XpUserMenu {
   _getHttp() {
     if (this._http) return this._http;
     try {
-      this._http = BdApi.Webpack.getByKeys('get', 'post', 'patch', 'put', 'delete');
-    } catch (_) {}
+      const filter = BdApi.Webpack.Filters?.byStrings;
+      const module = filter
+        ? BdApi.Webpack.getModule(filter('/interactions'), { searchExports: true })
+        : null;
+      const endpointModule = module?.default || module;
+      if (typeof endpointModule?.post === 'function') this._http = endpointModule;
+    }
+    catch (_) {}
     if (!this._http) {
       try {
-        const filter = BdApi.Webpack.Filters?.byStrings;
-        if (filter) {
-          this._http = BdApi.Webpack.getModule(filter('/interactions'), { searchExports: true });
-        }
+        const module = BdApi.Webpack.getByKeys('get', 'post', 'patch', 'put', 'delete');
+        if (typeof module?.post === 'function') this._http = module;
       } catch (_) {}
     }
     return this._http;
@@ -334,24 +344,39 @@ module.exports = class XpUserMenu {
   async _fetchCommands(channelId, guildId) {
     const cacheKey = `${guildId || ''}:${channelId}`;
     const cached = this._commandCache.get(cacheKey);
-    if (cached && Date.now() - cached.at < 30000) return cached.commands;
+    if (cached && Date.now() - cached.at < 30000) {
+      this._debugLog('Command index cache hit', {
+        channelId,
+        guildId,
+        commandCount: cached.commands.length,
+      });
+      return cached.commands;
+    }
 
     const commands = [];
     const store = this._getCommandIndexStore();
     const channel = this._getChannel(channelId);
+    this._debugLog('Fetching command index', {
+      channelId,
+      guildId,
+      storeFound: !!store,
+      channelFound: !!channel,
+    });
     if (store) {
-      const append = (list) => {
-        if (Array.isArray(list)) commands.push(...list);
+      const append = (source, list) => {
+        const entries = Array.isArray(list) ? list : [];
+        commands.push(...entries);
+        this._debugLog('Command store source', { source, commandCount: entries.length });
       };
 
       try {
-        append(this._extractCommandsFromIndexState(store.getGuildState?.(guildId)));
+        append('guild state', this._extractCommandsFromIndexState(store.getGuildState?.(guildId)));
       } catch (error) {
         console.warn('[XpUserMenu] Guild command store lookup failed:', error);
       }
       try {
         if (channel) {
-          append(this._extractCommandsFromIndexState(
+          append('channel context', this._extractCommandsFromIndexState(
             store.getContextState?.({ type: 'channel', channel }),
           ));
         }
@@ -365,10 +390,10 @@ module.exports = class XpUserMenu {
             { commandTypes: [1], applicationCommands: true },
             { allowFetch: true },
           );
-          append(result?.commands);
+          append('channel query', result?.commands);
           if (result?.loading) {
             await new Promise((resolve) => setTimeout(resolve, 1500));
-            append(store.query(
+            append('channel query retry', store.query(
               { type: 'channel', channel },
               { commandTypes: [1], applicationCommands: true },
               { allowFetch: true },
@@ -387,7 +412,13 @@ module.exports = class XpUserMenu {
       for (const url of urls) {
         try {
           const response = await http.get({ url });
-          commands.push(...this._extractCommandsFromApiBody(response?.body ?? response?.data ?? response));
+          const entries = this._extractCommandsFromApiBody(response?.body ?? response?.data ?? response);
+          commands.push(...entries);
+          this._debugLog('Command API source', {
+            url,
+            status: response?.status ?? response?.statusCode ?? null,
+            commandCount: entries.length,
+          });
         } catch (error) {
           console.warn(`[XpUserMenu] Command index request failed (${url}):`, error);
         }
@@ -399,6 +430,15 @@ module.exports = class XpUserMenu {
       normalized.map((command) => [`${command.application_id}:${command.id}`, command]),
     ).values()];
     this._commandCache.set(cacheKey, { at: Date.now(), commands: uniqueCommands });
+    this._debugLog('Command index resolved', {
+      commandCount: uniqueCommands.length,
+      commands: uniqueCommands.map((command) => ({
+        name: command.name,
+        localizedName: command.name_localized || null,
+        id: command.id,
+        applicationId: command.application_id,
+      })),
+    });
     if (!uniqueCommands.length) {
       console.warn('[XpUserMenu] No application commands found for current channel.', {
         channelId,
@@ -548,6 +588,14 @@ module.exports = class XpUserMenu {
       const configuredName = operation === 'add'
         ? this.settings.addCommandName
         : this.settings.removeCommandName;
+      this._debugLog('XP command requested', {
+        operation,
+        configuredName,
+        userId,
+        amount,
+        channelId: channel.channelId,
+        guildId: channel.guildId,
+      });
       const commands = await this._fetchCommands(channel.channelId, channel.guildId);
       const command = commands.find((candidate) => this._matchesCommand(candidate, configuredName));
       if (!command) {
@@ -564,6 +612,13 @@ module.exports = class XpUserMenu {
         });
         throw new Error(`Command not found: ${configuredName}. Check the configured API command name in plugin settings.`);
       }
+      this._debugLog('XP command matched', {
+        configuredName,
+        commandName: command.name,
+        commandId: command.id,
+        applicationId: command.application_id,
+        optionNames: (command.options || []).map((option) => option.name),
+      });
 
       const userOption = this._findOption(command, this.settings.userOptionName, 6);
       const amountOption = this._findOption(command, this.settings.amountOptionName, 4);
@@ -592,9 +647,43 @@ module.exports = class XpUserMenu {
       };
 
       const http = this._getHttp();
-      await http.post({ url: '/interactions', body: payload });
+      if (typeof http?.post !== 'function') throw new Error('Discord HTTP post module is unavailable.');
+      this._debugLog('Sending interaction', {
+        endpoint: '/interactions',
+        commandName: command.name,
+        commandId: command.id,
+        applicationId: command.application_id,
+        channelId: channel.channelId,
+        guildId: channel.guildId,
+        options: payload.data.options,
+      });
+      const response = await http.post('/interactions', payload);
+      this._debugLog('Interaction response received', {
+        status: response?.status ?? response?.statusCode ?? null,
+        ok: response?.ok ?? null,
+        responseType: response == null ? 'empty' : typeof response,
+        bodyType: typeof (response?.body ?? response?.data ?? response?.content),
+      });
+      if (response?.ok === false || (response?.status >= 400)) {
+        throw new Error(`Discord rejected the interaction request (HTTP ${response.status}).`);
+      }
+      const responseBody = response?.body ?? response?.data ?? response?.content;
+      const responseText = typeof response?.text === 'function'
+        ? await response.text()
+        : typeof responseBody === 'string'
+          ? responseBody
+          : '';
+      if (/You need to enable JavaScript to run this app/i.test(responseText)) {
+        throw new Error('Discord returned an HTML page instead of accepting the interaction.');
+      }
       this._toast(`${operation === 'add' ? 'Added' : 'Removed'} ${Number(amount).toLocaleString()} XP.`, 'success');
     } catch (error) {
+      this._debugLog('XP command failed', {
+        operation,
+        userId,
+        amount,
+        error: error?.message || String(error),
+      });
       console.error('[XpUserMenu] Experience command failed.', {
         operation,
         userId,
@@ -635,6 +724,20 @@ module.exports = class XpUserMenu {
 
     root.append(heading('Command API names'), field('Add command API name', 'addCommandName'), field('Remove command API name', 'removeCommandName'));
     root.append(heading('Option names'), field('User option API name', 'userOptionName'), field('Experience option API name', 'amountOptionName'));
+
+    const debugRow = document.createElement('label');
+    debugRow.style.cssText = 'display:flex;align-items:center;gap:8px;color:var(--text-normal);font-size:13px;';
+    const debugToggle = document.createElement('input');
+    debugToggle.type = 'checkbox';
+    debugToggle.checked = this.settings.debugLogging;
+    debugToggle.addEventListener('change', () => {
+      this.settings.debugLogging = debugToggle.checked;
+      this._saveSettings();
+    });
+    const debugLabel = document.createElement('span');
+    debugLabel.textContent = 'Enable debug console logs';
+    debugRow.append(debugToggle, debugLabel);
+    root.appendChild(debugRow);
 
     const amountSection = document.createElement('section');
     amountSection.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
