@@ -2,7 +2,7 @@
  * @name XpUserMenu
  * @author Shawny
  * @description Add configurable experience commands to the user context menu.
- * @version 1.0.16
+ * @version 1.0.18
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/XpUserMenu.plugin.js
  */
@@ -21,7 +21,7 @@ const DEFAULT_SETTINGS = {
   userOptionName: '유저',
   amountOptionName: '경험치',
   debugLogging: true,
-  amounts: [500, 1000, 2000],
+  amounts: [500, 1000, 2000, 3000, 5000],
 };
 
 module.exports = class XpUserMenu {
@@ -42,7 +42,7 @@ module.exports = class XpUserMenu {
   }
 
   getVersion() {
-    return '1.0.16';
+    return '1.0.18';
   }
 
   getDescription() {
@@ -73,7 +73,9 @@ module.exports = class XpUserMenu {
 
   _loadSettings() {
     try {
-      const saved = BdApi.loadData(this.getName(), 'settings');
+      const saved = typeof BdApi.Data?.load === 'function'
+        ? BdApi.Data.load(this.getName(), 'settings')
+        : BdApi.loadData(this.getName(), 'settings');
       this.settings = {
         ...DEFAULT_SETTINGS,
         ...(saved || {}),
@@ -104,7 +106,13 @@ module.exports = class XpUserMenu {
 
   _saveSettings() {
     try {
-      BdApi.saveData(this.getName(), 'settings', this.settings);
+      if (typeof BdApi.Data?.save === 'function') {
+        BdApi.Data.save(this.getName(), 'settings', this.settings);
+      } else if (typeof BdApi.saveData === 'function') {
+        BdApi.saveData(this.getName(), 'settings', this.settings);
+      } else {
+        throw new Error('BetterDiscord data storage API is unavailable.');
+      }
     } catch (error) {
       this._toast(`Could not save settings: ${error?.message || error}`, 'error');
     }
