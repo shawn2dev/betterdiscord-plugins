@@ -2,7 +2,7 @@
  * @name XpUserMenu
  * @author Shawny
  * @description Add configurable experience commands to the user context menu.
- * @version 1.0.12
+ * @version 1.0.13
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/XpUserMenu.plugin.js
  */
@@ -42,7 +42,7 @@ module.exports = class XpUserMenu {
   }
 
   getVersion() {
-    return '1.0.12';
+    return '1.0.13';
   }
 
   getDescription() {
@@ -315,18 +315,27 @@ module.exports = class XpUserMenu {
       const commandText = `/${commandName} ${this.settings.userOptionName}:<@${userId}> ${this.settings.amountOptionName}:${Number(amount)}`;
 
       editor.focus();
-      const selection = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(editor);
-      selection.removeAllRanges();
-      selection.addRange(range);
-      const inserted = document.execCommand('insertText', false, commandText);
-      if (!inserted || !editor.textContent?.includes(commandText)) {
+      if (typeof DataTransfer !== 'function' || typeof ClipboardEvent !== 'function') {
+        throw new Error('This Discord client does not support inserting a command draft through paste.');
+      }
+
+      document.execCommand('selectAll');
+      const clipboardData = new DataTransfer();
+      clipboardData.setData('text/plain', commandText);
+      const pasteEvent = new ClipboardEvent('paste', {
+        bubbles: true,
+        cancelable: true,
+        clipboardData,
+      });
+      editor.dispatchEvent(pasteEvent);
+
+      const editorText = String(editor.innerText ?? editor.textContent ?? '')
+        .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
+      if (!editorText.includes(commandText)) {
         throw new Error('Could not prepare the command in the message input.');
       }
 
       this._debugLog('XP command draft prepared', { operation, commandName, amount });
-      this._toast('Message input replaced with the command draft. Review it and send it manually.', 'success');
     } catch (error) {
       this._debugLog('XP command draft preparation failed', { operation, error: error?.message || String(error) });
       this._toast(error?.message || 'Could not prepare the command.', 'error');
