@@ -2,7 +2,7 @@
  * @name XpUserMenu
  * @author Shawny
  * @description Add configurable experience commands to the user context menu.
- * @version 1.0.1
+ * @version 1.0.2
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/XpUserMenu.plugin.js
  */
@@ -43,7 +43,7 @@ module.exports = class XpUserMenu {
   }
 
   getVersion() {
-    return '1.0.1';
+    return '1.0.2';
   }
 
   getDescription() {
@@ -213,7 +213,14 @@ module.exports = class XpUserMenu {
       if (!userId) return;
 
       const menu = this._findContextMenuNode(tree, 'user-context');
-      if (!Array.isArray(menu?.children)) return;
+      const menuChildren =
+        (Array.isArray(menu?.children) && menu.children) ||
+        (Array.isArray(menu?.props?.children) && menu.props.children) ||
+        this._getRootMenuChildren(tree);
+      if (!menuChildren) {
+        console.warn('[XpUserMenu] Could not locate user context menu children.');
+        return;
+      }
 
       const actions = [
         this._buildXpSubmenu('경험치 추가', 'add', userId),
@@ -221,7 +228,7 @@ module.exports = class XpUserMenu {
       ];
       const items = actions.filter(Boolean);
       if (!items.length) return;
-      menu.children.push(BdApi.ContextMenu.buildMenuChildren([{ type: 'group', items }]));
+      menuChildren.push(BdApi.ContextMenu.buildMenuChildren([{ type: 'group', items }]));
     };
 
     try {
@@ -253,6 +260,13 @@ module.exports = class XpUserMenu {
         else if (child && typeof child === 'object') pending.push(child);
       }
     }
+    return null;
+  }
+
+  _getRootMenuChildren(tree) {
+    if (Array.isArray(tree)) return tree;
+    if (Array.isArray(tree?.children)) return tree.children;
+    if (Array.isArray(tree?.props?.children)) return tree.props.children;
     return null;
   }
 
