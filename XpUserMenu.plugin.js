@@ -2,7 +2,7 @@
  * @name XpUserMenu
  * @author Shawny
  * @description Add configurable experience commands to the user context menu.
- * @version 1.0.8
+ * @version 1.0.9
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/XpUserMenu.plugin.js
  */
@@ -44,7 +44,7 @@ module.exports = class XpUserMenu {
   }
 
   getVersion() {
-    return '1.0.8';
+    return '1.0.9';
   }
 
   getDescription() {
@@ -339,6 +339,60 @@ module.exports = class XpUserMenu {
       } catch (_) {}
     }
     return this._http;
+  }
+
+  _getAuthToken() {
+    const readToken = (module) => {
+      try {
+        if (typeof module?.getToken === 'function') return module.getToken();
+        if (typeof module?.getAuthToken === 'function') return module.getAuthToken();
+      } catch (_) {}
+      return null;
+    };
+
+    for (const storeName of ['AuthenticationStore', 'AuthStore']) {
+      try {
+        const token = readToken(BdApi.Webpack.getStore?.(storeName));
+        if (typeof token === 'string' && token) return token;
+      } catch (_) {}
+    }
+
+    try {
+      const module = BdApi.Webpack.getModule((candidate) =>
+        typeof candidate?.getToken === 'function' || typeof candidate?.getAuthToken === 'function',
+      );
+      const token = readToken(module);
+      if (typeof token === 'string' && token) return token;
+    } catch (_) {}
+    return null;
+  }
+
+  async _postInteraction(payload) {
+    const token = this._getAuthToken();
+    if (!token) throw new Error('Discord authentication token is unavailable from the client AuthStore.');
+
+    const response = await fetch('https://discord.com/api/v9/interactions', {
+      method: 'POST',
+      headers: {
+        Authorization: token,
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify(payload),
+    });
+    const responseText = await response.text();
+    this._debugLog('Interaction HTTP response', {
+      status: response.status,
+      ok: response.ok,
+      contentType: response.headers.get('content-type'),
+      responsePreview: responseText.slice(0, 400),
+    });
+    if (!response.ok) {
+      throw new Error(`Discord rejected the interaction request (HTTP ${response.status}): ${responseText.slice(0, 250)}`);
+    }
+    if (/You need to enable JavaScript to run this app/i.test(responseText)) {
+      throw new Error('Discord returned an HTML page instead of accepting the interaction.');
+    }
   }
 
   async _fetchCommands(channelId, guildId) {
@@ -646,9 +700,7 @@ module.exports = class XpUserMenu {
         analytics_location: 'user_context_menu',
       };
 
-      const http = this._getHttp();
-      if (typeof http?.post !== 'function') throw new Error('Discord HTTP post module is unavailable.');
-      this._debugLog('Sending interaction through Discord REST client', {
+      this._debugLog('Sending authenticated interaction request', {
         endpoint: '/interactions',
         commandName: command.name,
         commandId: command.id,
@@ -657,25 +709,7 @@ module.exports = class XpUserMenu {
         guildId: channel.guildId,
         options: payload.data.options,
       });
-      const response = await http.post({ url: '/interactions', body: payload });
-      this._debugLog('Interaction response received', {
-        status: response?.status ?? response?.statusCode ?? null,
-        ok: response?.ok ?? null,
-        responseType: response == null ? 'empty' : typeof response,
-        bodyType: typeof (response?.body ?? response?.data ?? response?.content),
-      });
-      if (response?.ok === false || (response?.status >= 400)) {
-        throw new Error(`Discord rejected the interaction request (HTTP ${response.status}).`);
-      }
-      const responseBody = response?.body ?? response?.data ?? response?.content;
-      const responseText = typeof response?.text === 'function'
-        ? await response.text()
-        : typeof responseBody === 'string'
-          ? responseBody
-          : '';
-      if (/You need to enable JavaScript to run this app/i.test(responseText)) {
-        throw new Error('Discord returned an HTML page instead of accepting the interaction.');
-      }
+      await this._postInteraction(payload);
       this._toast(`${operation === 'add' ? 'Added' : 'Removed'} ${Number(amount).toLocaleString()} XP.`, 'success');
     } catch (error) {
       this._debugLog('XP command failed', {
