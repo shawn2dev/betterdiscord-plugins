@@ -2,7 +2,7 @@
  * @name XpUserMenu
  * @author Shawny
  * @description Add configurable experience commands to the user context menu.
- * @version 1.0.10
+ * @version 1.0.12
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/XpUserMenu.plugin.js
  */
@@ -42,7 +42,7 @@ module.exports = class XpUserMenu {
   }
 
   getVersion() {
-    return '1.0.10';
+    return '1.0.12';
   }
 
   getDescription() {
@@ -309,23 +309,24 @@ module.exports = class XpUserMenu {
         '[data-slate-editor="true"][contenteditable="true"], [role="textbox"][contenteditable="true"]',
       );
       if (!editor) throw new Error('Could not find the Discord message input.');
-      if (editor.textContent?.trim()) {
-        throw new Error('The message input is not empty. Send or clear its current draft first.');
-      }
-
       const commandName = operation === 'add'
         ? this.settings.addCommandName
         : this.settings.removeCommandName;
       const commandText = `/${commandName} ${this.settings.userOptionName}:<@${userId}> ${this.settings.amountOptionName}:${Number(amount)}`;
 
       editor.focus();
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(editor);
+      selection.removeAllRanges();
+      selection.addRange(range);
       const inserted = document.execCommand('insertText', false, commandText);
       if (!inserted || !editor.textContent?.includes(commandText)) {
         throw new Error('Could not prepare the command in the message input.');
       }
 
       this._debugLog('XP command draft prepared', { operation, commandName, amount });
-      this._toast('Command draft prepared. Review it, select the slash command if prompted, and send it manually.', 'success');
+      this._toast('Message input replaced with the command draft. Review it and send it manually.', 'success');
     } catch (error) {
       this._debugLog('XP command draft preparation failed', { operation, error: error?.message || String(error) });
       this._toast(error?.message || 'Could not prepare the command.', 'error');
@@ -430,7 +431,7 @@ module.exports = class XpUserMenu {
     root.appendChild(amountSection);
 
     const note = document.createElement('div');
-    note.textContent = 'Commands are prepared in the message input only. Review and send them manually.';
+    note.textContent = 'Selecting an amount replaces all current message input text with a command draft. Review and send it manually.';
     note.style.cssText = 'font-size:12px;line-height:1.4;color:var(--text-muted);';
     root.appendChild(note);
 
