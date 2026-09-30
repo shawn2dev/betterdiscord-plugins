@@ -2,7 +2,7 @@
  * @name XpUserMenu
  * @author Shawny
  * @description Add configurable experience commands to the user context menu.
- * @version 1.0.14
+ * @version 1.0.15
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/XpUserMenu.plugin.js
  */
@@ -16,8 +16,8 @@ const UPDATE_INITIAL_DELAY_MS = 5000;
 const UPDATE_INTERVAL_MS = 60 * 60 * 1000;
 
 const DEFAULT_SETTINGS = {
-  addCommandName: 'addxp',
-  removeCommandName: 'removexp',
+  addCommandName: '경험치추가',
+  removeCommandName: '경험치제거',
   userOptionName: 'user',
   amountOptionName: 'exp',
   debugLogging: true,
@@ -42,7 +42,7 @@ module.exports = class XpUserMenu {
   }
 
   getVersion() {
-    return '1.0.14';
+    return '1.0.15';
   }
 
   getDescription() {
@@ -78,12 +78,12 @@ module.exports = class XpUserMenu {
         ...DEFAULT_SETTINGS,
         ...(saved || {}),
         addCommandName:
-          saved?.addCommandName === '경험치추가'
-            ? 'addxp'
+          saved?.addCommandName === 'addxp'
+            ? '경험치추가'
             : saved?.addCommandName || DEFAULT_SETTINGS.addCommandName,
         removeCommandName:
-          saved?.removeCommandName === '경험치제거'
-            ? 'removexp'
+          saved?.removeCommandName === 'removexp'
+            ? '경험치제거'
             : saved?.removeCommandName || DEFAULT_SETTINGS.removeCommandName,
         amounts: Array.isArray(saved?.amounts)
           ? [...new Set(saved.amounts.map(Number).filter((value) => Number.isInteger(value) && value > 0))]
