@@ -2,7 +2,7 @@
  * @name XpUserMenu
  * @author Shawny
  * @description Add configurable experience commands to the user context menu.
- * @version 1.0.7
+ * @version 1.0.8
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/XpUserMenu.plugin.js
  */
@@ -44,7 +44,7 @@ module.exports = class XpUserMenu {
   }
 
   getVersion() {
-    return '1.0.7';
+    return '1.0.8';
   }
 
   getDescription() {
@@ -323,19 +323,19 @@ module.exports = class XpUserMenu {
 
   _getHttp() {
     if (this._http) return this._http;
-    try {
-      const filter = BdApi.Webpack.Filters?.byStrings;
-      const module = filter
-        ? BdApi.Webpack.getModule(filter('/interactions'), { searchExports: true })
-        : null;
-      const endpointModule = module?.default || module;
-      if (typeof endpointModule?.post === 'function') this._http = endpointModule;
-    }
-    catch (_) {}
-    if (!this._http) {
+    const methodSets = [
+      ['get', 'post', 'patch', 'put', 'del'],
+      ['get', 'post', 'patch', 'put', 'delete'],
+    ];
+    for (const keys of methodSets) {
       try {
-        const module = BdApi.Webpack.getByKeys('get', 'post', 'patch', 'put', 'delete');
-        if (typeof module?.post === 'function') this._http = module;
+        const module = BdApi.Webpack.getByKeys(...keys);
+        const candidate = module?.default || module;
+        if (typeof candidate?.get === 'function' && typeof candidate?.post === 'function') {
+          this._http = candidate;
+          this._debugLog('Authenticated REST client selected', { methods: keys });
+          break;
+        }
       } catch (_) {}
     }
     return this._http;
@@ -648,7 +648,7 @@ module.exports = class XpUserMenu {
 
       const http = this._getHttp();
       if (typeof http?.post !== 'function') throw new Error('Discord HTTP post module is unavailable.');
-      this._debugLog('Sending interaction', {
+      this._debugLog('Sending interaction through Discord REST client', {
         endpoint: '/interactions',
         commandName: command.name,
         commandId: command.id,
@@ -657,7 +657,7 @@ module.exports = class XpUserMenu {
         guildId: channel.guildId,
         options: payload.data.options,
       });
-      const response = await http.post('/interactions', payload);
+      const response = await http.post({ url: '/interactions', body: payload });
       this._debugLog('Interaction response received', {
         status: response?.status ?? response?.statusCode ?? null,
         ok: response?.ok ?? null,
