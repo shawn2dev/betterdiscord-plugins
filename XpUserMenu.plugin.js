@@ -2,7 +2,7 @@
  * @name XpUserMenu
  * @author Shawny
  * @description Add configurable experience commands to the user context menu.
- * @version 1.0.3
+ * @version 1.0.5
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/XpUserMenu.plugin.js
  */
@@ -16,8 +16,8 @@ const UPDATE_INITIAL_DELAY_MS = 5000;
 const UPDATE_INTERVAL_MS = 60 * 60 * 1000;
 
 const DEFAULT_SETTINGS = {
-  addCommandName: '경험치추가',
-  removeCommandName: '경험치제거',
+  addCommandName: 'addxp',
+  removeCommandName: 'removexp',
   userOptionName: 'user',
   amountOptionName: 'exp',
   amounts: [500, 1000, 2000],
@@ -43,7 +43,7 @@ module.exports = class XpUserMenu {
   }
 
   getVersion() {
-    return '1.0.3';
+    return '1.0.5';
   }
 
   getDescription() {
@@ -78,6 +78,14 @@ module.exports = class XpUserMenu {
       this.settings = {
         ...DEFAULT_SETTINGS,
         ...(saved || {}),
+        addCommandName:
+          saved?.addCommandName === '경험치추가'
+            ? 'addxp'
+            : saved?.addCommandName || DEFAULT_SETTINGS.addCommandName,
+        removeCommandName:
+          saved?.removeCommandName === '경험치제거'
+            ? 'removexp'
+            : saved?.removeCommandName || DEFAULT_SETTINGS.removeCommandName,
         amounts: Array.isArray(saved?.amounts)
           ? [...new Set(saved.amounts.map(Number).filter((value) => Number.isInteger(value) && value > 0))]
           : [...DEFAULT_SETTINGS.amounts],
@@ -226,11 +234,10 @@ module.exports = class XpUserMenu {
         this._buildXpSubmenu('경험치 추가', 'add', userId),
         this._buildXpSubmenu('경험치 제거', 'remove', userId),
       ];
-      actions.filter(Boolean).forEach((item) => {
-        menuChildren.push(
-          BdApi.ContextMenu.buildMenuChildren([{ type: 'group', items: [item] }]),
-        );
-      });
+      const items = actions.filter(Boolean);
+      if (items.length) {
+        menuChildren.push(BdApi.ContextMenu.buildMenuChildren([{ type: 'group', items }]));
+      }
     };
 
     try {
@@ -325,44 +332,188 @@ module.exports = class XpUserMenu {
   }
 
   async _fetchCommands(channelId, guildId) {
-    const cached = this._commandCache.get(channelId);
+    const cacheKey = `${guildId || ''}:${channelId}`;
+    const cached = this._commandCache.get(cacheKey);
     if (cached && Date.now() - cached.at < 30000) return cached.commands;
 
-    const http = this._getHttp();
-    if (typeof http?.get !== 'function') throw new Error('Discord command API is unavailable.');
-
-    const response = await http.get({ url: `/channels/${channelId}/application-command-index` });
-    const body = response?.body ?? response?.data ?? response;
     const commands = [];
-    const visited = new Set();
+    const store = this._getCommandIndexStore();
+    const channel = this._getChannel(channelId);
+    if (store) {
+      const append = (list) => {
+        if (Array.isArray(list)) commands.push(...list);
+      };
 
-    const visit = (value) => {
-      if (!value || typeof value !== 'object' || visited.has(value)) return;
-      visited.add(value);
-      if (
-        !Array.isArray(value) &&
-        value.id &&
-        (value.application_id || value.applicationId) &&
-        value.name &&
-        Number(value.type ?? 1) === 1
-      ) {
-        commands.push(value);
+      try {
+        append(this._extractCommandsFromIndexState(store.getGuildState?.(guildId)));
+      } catch (error) {
+        console.warn('[XpUserMenu] Guild command store lookup failed:', error);
       }
-      if (Array.isArray(value)) value.forEach(visit);
-      else Object.values(value).forEach(visit);
-    };
+      try {
+        if (channel) {
+          append(this._extractCommandsFromIndexState(
+            store.getContextState?.({ type: 'channel', channel }),
+          ));
+        }
+      } catch (error) {
+        console.warn('[XpUserMenu] Channel command store lookup failed:', error);
+      }
+      try {
+        if (channel && typeof store.query === 'function') {
+          const result = store.query(
+            { type: 'channel', channel },
+            { commandTypes: [1], applicationCommands: true },
+            { allowFetch: true },
+          );
+          append(result?.commands);
+          if (result?.loading) {
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            append(store.query(
+              { type: 'channel', channel },
+              { commandTypes: [1], applicationCommands: true },
+              { allowFetch: true },
+            )?.commands);
+          }
+        }
+      } catch (error) {
+        console.warn('[XpUserMenu] Command store query failed:', error);
+      }
+    }
 
-    visit(body);
-    const uniqueCommands = [...new Map(commands.map((command) => [String(command.id), command])).values()];
-    this._commandCache.set(channelId, { at: Date.now(), commands: uniqueCommands });
+    const http = this._getHttp();
+    if (typeof http?.get === 'function') {
+      const urls = [`/channels/${channelId}/application-command-index`];
+      if (guildId) urls.push(`/guilds/${guildId}/application-command-index`);
+      for (const url of urls) {
+        try {
+          const response = await http.get({ url });
+          commands.push(...this._extractCommandsFromApiBody(response?.body ?? response?.data ?? response));
+        } catch (error) {
+          console.warn(`[XpUserMenu] Command index request failed (${url}):`, error);
+        }
+      }
+    }
+
+    const normalized = commands.map((command) => this._normalizeCommand(command)).filter(Boolean);
+    const uniqueCommands = [...new Map(
+      normalized.map((command) => [`${command.application_id}:${command.id}`, command]),
+    ).values()];
+    this._commandCache.set(cacheKey, { at: Date.now(), commands: uniqueCommands });
+    if (!uniqueCommands.length) {
+      console.warn('[XpUserMenu] No application commands found for current channel.', {
+        channelId,
+        guildId,
+        storeFound: !!store,
+        channelFound: !!channel,
+      });
+    }
     return uniqueCommands;
   }
 
+  _getCommandIndexStore() {
+    try {
+      const store = BdApi.Webpack.getStore?.('ApplicationCommandIndexStore');
+      if (store) return store;
+    } catch (_) {}
+
+    try {
+      return BdApi.Webpack.getModule((module) =>
+        module?.indices != null &&
+        typeof module.query === 'function' &&
+        typeof module.getGuildState === 'function',
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _getChannel(channelId) {
+    try {
+      const store = BdApi.Webpack.getStore?.('ChannelStore') ||
+        BdApi.Webpack.getModule((module) =>
+          typeof module?.getChannel === 'function' && typeof module?.getChannelId === 'function',
+        );
+      return store?.getChannel?.(channelId) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _extractCommandsFromIndexState(state) {
+    const sections = state?.result?.sections;
+    if (!sections || typeof sections !== 'object') return [];
+    return Object.values(sections).flatMap((section) => {
+      const entries = section?.commands;
+      if (!entries) return [];
+      return Array.isArray(entries) ? entries : Object.values(entries);
+    });
+  }
+
+  _extractCommandsFromApiBody(body) {
+    if (!body || typeof body !== 'object') return [];
+    const commands = [];
+    const visited = new Set();
+    const visit = (value) => {
+      if (!value || typeof value !== 'object' || visited.has(value)) return;
+      visited.add(value);
+      if (Array.isArray(value)) {
+        value.forEach(visit);
+        return;
+      }
+      if (value.application_commands) visit(value.application_commands);
+      if (value.sections && typeof value.sections === 'object') {
+        Object.values(value.sections).forEach((section) => visit(section?.commands));
+      }
+      if (value.commands) visit(value.commands);
+      if (value.id && (value.name || value.rootCommand?.name)) commands.push(value);
+      Object.values(value).forEach((child) => {
+        if (child && typeof child === 'object') visit(child);
+      });
+    };
+    visit(body);
+    return commands;
+  }
+
+  _normalizeCommand(command) {
+    if (!command || typeof command !== 'object') return null;
+    const root = command.rootCommand || command;
+    const id = root.id || command.id;
+    const name = command.name || command.untranslatedName || command.displayName || root.name;
+    const applicationId =
+      command.application_id ||
+      command.applicationId ||
+      command.application?.id ||
+      root.application_id;
+    if (!id || !name || !applicationId) return null;
+    return {
+      ...command,
+      id: String(id),
+      name: String(name),
+      application_id: String(applicationId),
+      version: command.version ?? command.version_id ?? root.version,
+      options: root.options || command.options || [],
+      type: root.type ?? command.type ?? 1,
+    };
+  }
+
+  _getCommandNames(command) {
+    const root = command.rootCommand || command;
+    const names = [
+      command.name,
+      command.untranslatedName,
+      command.displayName,
+      command.name_localized,
+      command.name_default,
+      root.name,
+    ];
+    if (command.name_localizations && typeof command.name_localizations === 'object') {
+      names.push(...Object.values(command.name_localizations));
+    }
+    return [...new Set(names.filter((name) => typeof name === 'string').map((name) => name.toLocaleLowerCase()))];
+  }
+
   _matchesCommand(command, configuredName) {
-    const names = [command.name, command.name_localized, command.name_default]
-      .filter((name) => typeof name === 'string')
-      .map((name) => name.toLocaleLowerCase());
-    return names.includes(configuredName.trim().toLocaleLowerCase());
+    return this._getCommandNames(command).includes(configuredName.trim().toLocaleLowerCase());
   }
 
   _findOption(command, configuredName, type) {
@@ -399,7 +550,20 @@ module.exports = class XpUserMenu {
         : this.settings.removeCommandName;
       const commands = await this._fetchCommands(channel.channelId, channel.guildId);
       const command = commands.find((candidate) => this._matchesCommand(candidate, configuredName));
-      if (!command) throw new Error(`Command not found: ${configuredName}`);
+      if (!command) {
+        console.error('[XpUserMenu] Command not found.', {
+          configuredName,
+          channelId: channel.channelId,
+          guildId: channel.guildId,
+          availableCommands: commands.map((candidate) => ({
+            name: candidate.name,
+            localizedName: candidate.name_localized,
+            applicationId: candidate.application_id,
+            id: candidate.id,
+          })),
+        });
+        throw new Error(`Command not found: ${configuredName}. Check the configured API command name in plugin settings.`);
+      }
 
       const userOption = this._findOption(command, this.settings.userOptionName, 6);
       const amountOption = this._findOption(command, this.settings.amountOptionName, 4);
@@ -431,6 +595,12 @@ module.exports = class XpUserMenu {
       await http.post({ url: '/interactions', body: payload });
       this._toast(`${operation === 'add' ? 'Added' : 'Removed'} ${Number(amount).toLocaleString()} XP.`, 'success');
     } catch (error) {
+      console.error('[XpUserMenu] Experience command failed.', {
+        operation,
+        userId,
+        amount,
+        error,
+      });
       this._toast(error?.message || 'Could not run the experience command.', 'error');
     }
   }
@@ -463,7 +633,7 @@ module.exports = class XpUserMenu {
       return wrap;
     };
 
-    root.append(heading('Command names'), field('Add command localized name', 'addCommandName'), field('Remove command localized name', 'removeCommandName'));
+    root.append(heading('Command API names'), field('Add command API name', 'addCommandName'), field('Remove command API name', 'removeCommandName'));
     root.append(heading('Option names'), field('User option API name', 'userOptionName'), field('Experience option API name', 'amountOptionName'));
 
     const amountSection = document.createElement('section');
