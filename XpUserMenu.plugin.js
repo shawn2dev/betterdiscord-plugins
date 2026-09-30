@@ -2,7 +2,7 @@
  * @name XpUserMenu
  * @author Shawny
  * @description Add configurable experience commands to the user context menu.
- * @version 1.0.2
+ * @version 1.0.3
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/XpUserMenu.plugin.js
  */
@@ -43,7 +43,7 @@ module.exports = class XpUserMenu {
   }
 
   getVersion() {
-    return '1.0.2';
+    return '1.0.3';
   }
 
   getDescription() {
@@ -226,9 +226,11 @@ module.exports = class XpUserMenu {
         this._buildXpSubmenu('경험치 추가', 'add', userId),
         this._buildXpSubmenu('경험치 제거', 'remove', userId),
       ];
-      const items = actions.filter(Boolean);
-      if (!items.length) return;
-      menuChildren.push(BdApi.ContextMenu.buildMenuChildren([{ type: 'group', items }]));
+      actions.filter(Boolean).forEach((item) => {
+        menuChildren.push(
+          BdApi.ContextMenu.buildMenuChildren([{ type: 'group', items: [item] }]),
+        );
+      });
     };
 
     try {
@@ -273,9 +275,12 @@ module.exports = class XpUserMenu {
   _buildXpSubmenu(label, operation, userId) {
     if (!this.settings.amounts.length) return null;
     return {
+      id: `xp-${operation}`,
       label,
       type: 'submenu',
       items: this.settings.amounts.map((amount) => ({
+        id: `xp-${operation}-${amount}`,
+        type: 'text',
         label: `${operation === 'add' ? '+' : '-'}${amount.toLocaleString()} XP`,
         action: () => this._runXpCommand(operation, userId, amount),
       })),
