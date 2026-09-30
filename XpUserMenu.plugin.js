@@ -2,7 +2,7 @@
  * @name XpUserMenu
  * @author Shawny
  * @description Add configurable experience commands to the user context menu.
- * @version 1.0.0
+ * @version 1.0.1
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/XpUserMenu.plugin.js
  */
@@ -43,7 +43,7 @@ module.exports = class XpUserMenu {
   }
 
   getVersion() {
-    return '1.0.0';
+    return '1.0.1';
   }
 
   getDescription() {
@@ -199,28 +199,29 @@ module.exports = class XpUserMenu {
   }
 
   _patchContextMenu() {
-    if (!BdApi.ContextMenu?.patch || !BdApi.ContextMenu?.buildItem) {
+    if (!BdApi.ContextMenu?.patch || !BdApi.ContextMenu?.buildMenuChildren) {
       this._toast('BetterDiscord ContextMenu API is unavailable.', 'error');
       return;
     }
 
-    this._patchCallback = (menu, props) => {
+    this._patchCallback = (tree, props) => {
       const userId =
         props?.user?.id ||
         props?.member?.user?.id ||
         props?.userId ||
         props?.targetUser?.id;
-      if (!userId || !menu?.props) return;
+      if (!userId) return;
+
+      const menu = this._findContextMenuNode(tree, 'user-context');
+      if (!Array.isArray(menu?.children)) return;
 
       const actions = [
         this._buildXpSubmenu('경험치 추가', 'add', userId),
         this._buildXpSubmenu('경험치 제거', 'remove', userId),
       ];
-      const children = menu.props.children;
-      menu.props.children = [
-        ...(Array.isArray(children) ? children : children == null ? [] : [children]),
-        ...actions.filter(Boolean),
-      ];
+      const items = actions.filter(Boolean);
+      if (!items.length) return;
+      menu.children.push(BdApi.ContextMenu.buildMenuChildren([{ type: 'group', items }]));
     };
 
     try {
@@ -230,19 +231,41 @@ module.exports = class XpUserMenu {
     }
   }
 
+  _findContextMenuNode(tree, navId) {
+    const pending = [tree];
+    const visited = new WeakSet();
+
+    while (pending.length) {
+      const node = pending.pop();
+      if (!node || typeof node !== 'object' || visited.has(node)) continue;
+      visited.add(node);
+
+      if (Array.isArray(node)) {
+        pending.push(...node);
+        continue;
+      }
+
+      if (node.navId === navId || node.props?.navId === navId) return node;
+
+      const children = [node.children, node.props?.children];
+      for (const child of children) {
+        if (Array.isArray(child)) pending.push(...child);
+        else if (child && typeof child === 'object') pending.push(child);
+      }
+    }
+    return null;
+  }
+
   _buildXpSubmenu(label, operation, userId) {
     if (!this.settings.amounts.length) return null;
-    return BdApi.ContextMenu.buildItem({
-      type: 'submenu',
+    return {
       label,
-      items: this.settings.amounts.map((amount) =>
-        BdApi.ContextMenu.buildItem({
-          type: 'text',
-          label: `${operation === 'add' ? '+' : '-'}${amount.toLocaleString()} XP`,
-          action: () => this._runXpCommand(operation, userId, amount),
-        }),
-      ),
-    });
+      type: 'submenu',
+      items: this.settings.amounts.map((amount) => ({
+        label: `${operation === 'add' ? '+' : '-'}${amount.toLocaleString()} XP`,
+        action: () => this._runXpCommand(operation, userId, amount),
+      })),
+    };
   }
 
   _getCurrentChannel() {
