@@ -51,6 +51,10 @@ module.exports = class XpUserMenu {
 
   start() {
     this._loadSettings();
+    console.info('[XpUserMenu] Plugin started', {
+      debugLogging: this.settings.debugLogging,
+      amountCount: this.settings.amounts.length,
+    });
     this._patchContextMenu();
     this._startAutoUpdateChecks();
   }
@@ -127,7 +131,7 @@ module.exports = class XpUserMenu {
 
   _debugLog(event, details = {}) {
     if (!this.settings.debugLogging) return;
-    console.debug(`[XpUserMenu] ${event}`, details);
+    console.info(`[XpUserMenu] ${event}`, details);
   }
 
   _parseVersion(version) {
@@ -228,41 +232,57 @@ module.exports = class XpUserMenu {
 
   _patchContextMenu() {
     if (!BdApi.ContextMenu?.patch || !BdApi.ContextMenu?.buildMenuChildren) {
+      console.error('[XpUserMenu] BetterDiscord ContextMenu API is unavailable.');
       this._toast('BetterDiscord ContextMenu API is unavailable.', 'error');
       return;
     }
 
     this._patchCallback = (tree, props) => {
-      const userId =
-        props?.user?.id ||
-        props?.member?.user?.id ||
-        props?.userId ||
-        props?.targetUser?.id;
-      if (!userId) return;
+      try {
+        const userId =
+          props?.user?.id ||
+          props?.member?.user?.id ||
+          props?.userId ||
+          props?.targetUser?.id;
+        this._debugLog('User context menu callback', {
+          propKeys: Object.keys(props || {}),
+          hasUserId: Boolean(userId),
+          amountCount: this.settings.amounts.length,
+        });
+        if (!userId) {
+          this._debugLog('Menu skipped: no user ID');
+          return;
+        }
 
-      const menu = this._findContextMenuNode(tree, 'user-context');
-      const menuChildren =
-        (Array.isArray(menu?.children) && menu.children) ||
-        (Array.isArray(menu?.props?.children) && menu.props.children) ||
-        this._getRootMenuChildren(tree);
-      if (!menuChildren) {
-        console.warn('[XpUserMenu] Could not locate user context menu children.');
-        return;
-      }
+        const menu = this._findContextMenuNode(tree, 'user-context');
+        const menuChildren = this._getRootMenuChildren(menu || tree);
+        if (!menuChildren) {
+          console.warn('[XpUserMenu] Could not locate user context menu children.');
+          return;
+        }
 
-      const actions = [
-        this._buildXpSubmenu('경험치 추가', 'add', userId),
-        this._buildXpSubmenu('경험치 제거', 'remove', userId),
-      ];
-      const items = actions.filter(Boolean);
-      if (items.length) {
-        menuChildren.push(BdApi.ContextMenu.buildMenuChildren([{ type: 'group', items }]));
+        const actions = [
+          this._buildXpSubmenu('경험치 추가', 'add', userId),
+          this._buildXpSubmenu('경험치 제거', 'remove', userId),
+        ];
+        const items = actions.filter(Boolean);
+        if (!items.length) {
+          this._debugLog('Menu skipped: no configured XP amounts');
+          return;
+        }
+        const group = BdApi.ContextMenu.buildMenuChildren([{ type: 'group', items }]);
+        menuChildren.push(...(Array.isArray(group) ? group : [group]));
+        this._debugLog('XP menu items added', { itemCount: items.length });
+      } catch (error) {
+        console.error('[XpUserMenu] User context menu patch failed:', error);
       }
     };
 
     try {
       this._unpatchUserContext = BdApi.ContextMenu.patch('user-context', this._patchCallback);
+      console.info('[XpUserMenu] User context menu patch registered');
     } catch (error) {
+      console.error('[XpUserMenu] Could not register user context menu patch:', error);
       this._toast(`Could not add user menu: ${error?.message || error}`, 'error');
     }
   }
@@ -294,8 +314,12 @@ module.exports = class XpUserMenu {
 
   _getRootMenuChildren(tree) {
     if (Array.isArray(tree)) return tree;
-    if (Array.isArray(tree?.children)) return tree.children;
-    if (Array.isArray(tree?.props?.children)) return tree.props.children;
+    for (const owner of [tree, tree?.props]) {
+      if (!owner || typeof owner !== 'object' || !('children' in owner)) continue;
+      if (Array.isArray(owner.children)) return owner.children;
+      owner.children = owner.children == null ? [] : [owner.children];
+      return owner.children;
+    }
     return null;
   }
 

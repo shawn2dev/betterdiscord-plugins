@@ -589,13 +589,17 @@ module.exports = class MessageLoggerV3 {
 
     if (AttachmentUtils) {
       try {
-        const targetName = Object.keys(AttachmentUtils).find(e => AttachmentUtils[e].toString().match(/return \w\.attachments\.some\(\w\)\|\|\w\.embeds\.some\(\w\)/));
-        if (!targetName) throw new Error('Failed to find targetName');
+        const targetNames = Object.keys(AttachmentUtils).filter(name =>
+          typeof AttachmentUtils[name] === 'function' &&
+          /return\s+([$\w]+)\.attachments\.some\(\s*[$\w]+\s*\)\s*\|\|\s*\1\.embeds\.some\(\s*[$\w]+\s*\)/.test(AttachmentUtils[name].toString())
+        );
+        if (targetNames.length !== 1) throw new Error(`Expected one attachment expiry export, found ${targetNames.length}`);
+        const [targetName] = targetNames;
         this.unpatches.push(
           this.Patcher.instead(AttachmentUtils, targetName, (_, args, original) => {
             const [message] = args;
             // check if ID is in messageRecord and force return false
-            if (message.id && this.messageRecord[message.id]) return false;
+            if (message?.id && this.messageRecord[message.id]) return false;
 
             // run original otherwise to not interfere
             return original(...args);
@@ -3282,27 +3286,35 @@ module.exports = class MessageLoggerV3 {
     })();
 
     const useStateConstant = {};
-    this.unpatches.push(
-      this.Patcher.after(MessageContent, 'type', (_, [props], ret) => {
+    const cloneRenderTree = node => {
+      if (Array.isArray(node)) return node.map(cloneRenderTree);
+      if (!React.isValidElement(node)) return node;
+      return { ...node, props: { ...node.props, children: cloneRenderTree(node.props.children) } };
+    };
+    const patchMessageUpdates = (component, eventName, decorate) => {
+      const dispatcher = this.dispatcher;
+      function MessageUpdates({ messageProps, result }) {
         const forceUpdate = React.useState(useStateConstant)[1];
-        React.useEffect(
-          () => {
-            function callback(e) {
-              if (!e || !e.id || e.id === props.message.id) {
-                forceUpdate({});
-              }
-            }
-            this.dispatcher.subscribe('MLV2_FORCE_UPDATE_MESSAGE_CONTENT', callback);
-            return () => {
-              this.dispatcher.unsubscribe('MLV2_FORCE_UPDATE_MESSAGE_CONTENT', callback);
-            };
-          },
-          [props.message.id, forceUpdate]
-        );
+        React.useEffect(() => {
+          const callback = event => {
+            if (!event || !event.id || event.id === messageProps.message.id) forceUpdate({});
+          };
+          dispatcher.subscribe(eventName, callback);
+          return () => dispatcher.unsubscribe(eventName, callback);
+        }, [messageProps.message.id, forceUpdate]);
+        const rendered = cloneRenderTree(result);
+        return decorate(messageProps, rendered, forceUpdate) ?? rendered;
+      }
+      return this.Patcher.after(component, 'type', (_, [props], ret) =>
+        React.createElement(MessageUpdates, { messageProps: props, result: ret })
+      );
+    };
+    this.unpatches.push(
+      patchMessageUpdates(MessageContent, 'MLV2_FORCE_UPDATE_MESSAGE_CONTENT', (props, ret, forceUpdate) => {
         if ((typeof props.className === 'string' && ~props.className.indexOf('repliedTextContent'))) return;
         if (!this.editedMessageRecord[props.message.channel_id] || this.editedMessageRecord[props.message.channel_id].indexOf(props.message.id) === -1) return;
         const record = this.messageRecord[props.message.id];
-        if (!record || !Array.isArray(ret.props.children)) return;
+        if (!record || !Array.isArray(ret?.props?.children)) return;
         const createEditedMessage = (edit, editNum, options = { isSingular: false, noSuffix: false, hasMore: 'none', numHidden: 0 }) => {
           const { isSingular = false, noSuffix = false, hasMore = 'none', numHidden = 0 } = options;
 
@@ -3427,20 +3439,7 @@ module.exports = class MessageLoggerV3 {
       return null;
     }
     this.unpatches.push(
-      this.Patcher.after(MemoMessage, 'type', (_, [props], ret) => {
-        const forceUpdate = React.useState(useStateConstant)[1];
-        React.useEffect(
-          () => {
-            function callback(e) {
-              if (!e || !e.id || e.id === props.message.id) forceUpdate({});
-            }
-            this.dispatcher.subscribe('MLV2_FORCE_UPDATE_MESSAGE', callback);
-            return () => {
-              this.dispatcher.unsubscribe('MLV2_FORCE_UPDATE_MESSAGE', callback);
-            };
-          },
-          [props.message.id, forceUpdate]
-        );
+      patchMessageUpdates(MemoMessage, 'MLV2_FORCE_UPDATE_MESSAGE', (props, ret) => {
         const record = this.messageRecord[props.message.id];
         if (!record) return;
         if (props.message.editedTimestamp) record.message.edited_timestamp = new Date(props.message.editedTimestamp).getTime();
