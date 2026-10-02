@@ -14,7 +14,7 @@ const UPDATE_BRANCH = 'main';
 const UPDATE_FILENAME = 'XpUserMenu.plugin.js';
 const UPDATE_INITIAL_DELAY_MS = 5000;
 const UPDATE_INTERVAL_MS = 60 * 60 * 1000;
-const USER_CONTEXT_MENU_TARGET = '*';
+const USER_CONTEXT_MENU_TARGET = 'user-context';
 
 const DEFAULT_SETTINGS = {
   addCommandName: '경험치추가',
@@ -241,8 +241,8 @@ module.exports = class XpUserMenu {
 
     this._patchCallback = (tree, props) => {
       try {
-        const menu = this._findContextMenuNode(tree);
-        const navId = menu?.navId || menu?.props?.navId || '';
+        const menu = this._findContextMenuNode(tree, USER_CONTEXT_MENU_TARGET);
+        const navId = menu?.props?.navId || menu?.navId || '';
         const userId =
           props?.user?.id ||
           props?.member?.user?.id ||
@@ -260,9 +260,13 @@ module.exports = class XpUserMenu {
           return;
         }
 
-        const menuChildren = this._getRootMenuChildren(menu || tree);
+        const menuChildren = this._getRootMenuChildren(menu);
         if (!menuChildren) {
           console.warn('[XpUserMenu] Could not locate user context menu children.');
+          return;
+        }
+        if (this._hasXpMenuItems(menuChildren)) {
+          this._debugLog('Menu skipped: XP items already present');
           return;
         }
 
@@ -306,7 +310,7 @@ module.exports = class XpUserMenu {
         continue;
       }
 
-      const currentNavId = node.navId || node.props?.navId;
+      const currentNavId = node.props?.navId || node.navId;
       if (currentNavId && (!navId || currentNavId === navId)) return node;
 
       const children = [node.children, node.props?.children];
@@ -320,13 +324,30 @@ module.exports = class XpUserMenu {
 
   _getRootMenuChildren(tree) {
     if (Array.isArray(tree)) return tree;
-    for (const owner of [tree, tree?.props]) {
-      if (!owner || typeof owner !== 'object' || !('children' in owner)) continue;
-      if (Array.isArray(owner.children)) return owner.children;
-      owner.children = owner.children == null ? [] : [owner.children];
-      return owner.children;
+    const owner = tree?.props?.navId ? tree.props : tree;
+    if (!owner || typeof owner !== 'object') return null;
+    owner.children = Array.isArray(owner.children)
+      ? [...owner.children]
+      : owner.children == null ? [] : [owner.children];
+    return owner.children;
+  }
+
+  _hasXpMenuItems(tree) {
+    const pending = [tree];
+    const visited = new WeakSet();
+    while (pending.length) {
+      const node = pending.pop();
+      if (!node || typeof node !== 'object' || visited.has(node)) continue;
+      visited.add(node);
+      if (Array.isArray(node)) {
+        pending.push(...node);
+        continue;
+      }
+      const itemId = node.props?.id || node.id;
+      if (itemId === 'xp-add' || itemId === 'xp-remove') return true;
+      pending.push(node.children, node.props?.children);
     }
-    return null;
+    return false;
   }
 
   _buildXpSubmenu(label, operation, userId) {

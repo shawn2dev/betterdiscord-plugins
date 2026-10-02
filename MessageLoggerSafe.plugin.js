@@ -4912,11 +4912,18 @@ Pro tip: Right clicking the icon will filter the messages to the current channel
     }));
 
     this.unpatches.push(BdApi.ContextMenu.patch('user-context', (ret, props) => {
-      const menu = BdApi.Utils.getNestedValue(
-        this.findInReactTree(ret, e => e && e.navId === 'user-context'),
-        'children'
+      if (!props?.user?.id) return;
+      const menuNode = this.findInReactTree(
+        ret, node => node?.props?.navId === 'user-context' || node?.navId === 'user-context'
       );
-      if (!Array.isArray(menu)) return;
+      const menuOwner = menuNode?.props?.navId === 'user-context' ? menuNode.props : menuNode;
+      if (!menuOwner) {
+        Logger.warn(this.getName(), 'User context menu skipped: menu owner not found');
+        return;
+      }
+      const menu = menuOwner.children = Array.isArray(menuOwner.children)
+        ? [...menuOwner.children]
+        : menuOwner.children == null ? [] : [menuOwner.children];
 
       const newItems = [];
       const addElement = (label, action, options = {}) => newItems.push({ label, action, ...options });
@@ -4930,7 +4937,9 @@ Pro tip: Right clicking the icon will filter the messages to the current channel
         }
       );
 
-      if (props.channel?.isDM()) {
+      const channel = props.channel;
+      const isDM = typeof channel?.isDM === 'function' ? channel.isDM() : channel?.type === 1;
+      if (isDM) {
         addElement(
           `Open Log For DM`,
           () => {
@@ -4942,15 +4951,17 @@ Pro tip: Right clicking the icon will filter the messages to the current channel
         handleWhiteBlackList(newItems, props.channel.id);
       }
 
-      menu.push(BdApi.ContextMenu.buildMenuChildren([{
+      const group = BdApi.ContextMenu.buildMenuChildren([{
         type: 'group',
         items: [{
           type: 'submenu',
           label: this.settings.contextmenuSubmenuName,
           items: newItems
         }]
-      }]));
+      }]);
+      menu.push(...(Array.isArray(group) ? group : [group]));
     }));
+    Logger.info(this.getName(), 'User context menu patch registered', { target: 'user-context' });
 
     this.unpatches.push(BdApi.ContextMenu.patch('gdm-context', (ret, props) => {
       const menu = BdApi.Utils.getNestedValue(
