@@ -2,7 +2,7 @@
  * @name XpUserMenu
  * @author Shawny
  * @description Add configurable experience commands to the user context menu.
- * @version 1.0.18
+ * @version 1.0.19
  * @source https://github.com/shawn2dev/betterdiscord-plugins
  * @updateUrl https://raw.githubusercontent.com/shawn2dev/betterdiscord-plugins/refs/heads/main/XpUserMenu.plugin.js
  */
@@ -14,6 +14,7 @@ const UPDATE_BRANCH = 'main';
 const UPDATE_FILENAME = 'XpUserMenu.plugin.js';
 const UPDATE_INITIAL_DELAY_MS = 5000;
 const UPDATE_INTERVAL_MS = 60 * 60 * 1000;
+const USER_CONTEXT_MENU_TARGET = '*';
 
 const DEFAULT_SETTINGS = {
   addCommandName: '경험치추가',
@@ -42,7 +43,7 @@ module.exports = class XpUserMenu {
   }
 
   getVersion() {
-    return '1.0.18';
+    return '1.0.19';
   }
 
   getDescription() {
@@ -52,6 +53,7 @@ module.exports = class XpUserMenu {
   start() {
     this._loadSettings();
     console.info('[XpUserMenu] Plugin started', {
+      version: this.getVersion(),
       debugLogging: this.settings.debugLogging,
       amountCount: this.settings.amounts.length,
     });
@@ -68,7 +70,7 @@ module.exports = class XpUserMenu {
       if (typeof this._unpatchUserContext === 'function') {
         this._unpatchUserContext();
       } else if (this._patchCallback) {
-        BdApi.ContextMenu.unpatch('user-context', this._patchCallback);
+        BdApi.ContextMenu.unpatch(USER_CONTEXT_MENU_TARGET, this._patchCallback);
       }
     } catch (_) {}
     this._unpatchUserContext = null;
@@ -239,22 +241,25 @@ module.exports = class XpUserMenu {
 
     this._patchCallback = (tree, props) => {
       try {
+        const menu = this._findContextMenuNode(tree);
+        const navId = menu?.navId || menu?.props?.navId || '';
         const userId =
           props?.user?.id ||
           props?.member?.user?.id ||
           props?.userId ||
           props?.targetUser?.id;
         this._debugLog('User context menu callback', {
+          navId,
           propKeys: Object.keys(props || {}),
           hasUserId: Boolean(userId),
           amountCount: this.settings.amounts.length,
         });
+        if (!/(?:^|-)(?:user|member|profile)(?:-|$)/i.test(navId)) return;
         if (!userId) {
           this._debugLog('Menu skipped: no user ID');
           return;
         }
 
-        const menu = this._findContextMenuNode(tree, 'user-context');
         const menuChildren = this._getRootMenuChildren(menu || tree);
         if (!menuChildren) {
           console.warn('[XpUserMenu] Could not locate user context menu children.');
@@ -279,8 +284,8 @@ module.exports = class XpUserMenu {
     };
 
     try {
-      this._unpatchUserContext = BdApi.ContextMenu.patch('user-context', this._patchCallback);
-      console.info('[XpUserMenu] User context menu patch registered');
+      this._unpatchUserContext = BdApi.ContextMenu.patch(USER_CONTEXT_MENU_TARGET, this._patchCallback);
+      console.info('[XpUserMenu] User context menu patch registered', { target: USER_CONTEXT_MENU_TARGET });
     } catch (error) {
       console.error('[XpUserMenu] Could not register user context menu patch:', error);
       this._toast(`Could not add user menu: ${error?.message || error}`, 'error');
@@ -301,7 +306,8 @@ module.exports = class XpUserMenu {
         continue;
       }
 
-      if (node.navId === navId || node.props?.navId === navId) return node;
+      const currentNavId = node.navId || node.props?.navId;
+      if (currentNavId && (!navId || currentNavId === navId)) return node;
 
       const children = [node.children, node.props?.children];
       for (const child of children) {

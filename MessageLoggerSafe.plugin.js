@@ -1,6 +1,6 @@
 /**
  * @name MessageLoggerV3
- * @version 1.10.4
+ * @version 1.10.5
  * updateUrl removed to disable automatic updates
  * @runAt idle
  */
@@ -44,7 +44,7 @@ module.exports = class MessageLoggerV3 {
     return 'MessageLoggerV3';
   }
   getVersion() {
-    return '1.10.4';
+    return '1.10.5';
   }
   getAuthor() {
     return 'Lighty';
@@ -54,6 +54,7 @@ module.exports = class MessageLoggerV3 {
   }
   load() { }
   start() {
+    console.info('[MessageLoggerV3] Plugin started', { version: this.getVersion() });
     let onLoaded = () => {
       try {
         if (!this.UserStore) this.UserStore = Webpack.getByKeys('getCurrentUser', 'getUser');
