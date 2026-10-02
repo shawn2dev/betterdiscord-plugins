@@ -1,5 +1,5 @@
 /**
- * @name MessageLoggerV3
+ * @name MessageLoggerSafe
  * @version 1.10.5
  * updateUrl removed to disable automatic updates
  * @runAt idle
@@ -36,12 +36,14 @@ const MLV2_TYPE_L1 = Symbol('MLV2_TYPE_L1');
 const MLV2_TYPE_L2 = Symbol('MLV2_TYPE_L2');
 const MLV2_TYPE_L3 = Symbol('MLV2_TYPE_L3');
 const USER_COUNTER_INTERVAL = 1000 * 60 * 60 * 24 * 1;
+// Keep the existing storage namespace when renaming the plugin.
+const DATA_NAMESPACE = 'MessageLoggerV3';
 
 const { React, Webpack, Logger, Utils: { className } } = BdApi;
 
-module.exports = class MessageLoggerV3 {
+module.exports = class MessageLoggerSafe {
   getName() {
-    return 'MessageLoggerV3';
+    return 'MessageLoggerSafe';
   }
   getVersion() {
     return '1.10.5';
@@ -54,7 +56,7 @@ module.exports = class MessageLoggerV3 {
   }
   load() { }
   start() {
-    console.info('[MessageLoggerV3] Plugin started', { version: this.getVersion() });
+    console.info('[MessageLoggerSafe] Plugin started', { version: this.getVersion() });
     let onLoaded = () => {
       try {
         if (!this.UserStore) this.UserStore = Webpack.getByKeys('getCurrentUser', 'getUser');
@@ -243,7 +245,7 @@ module.exports = class MessageLoggerV3 {
       STARTUP_HELP: 1 << 1
     };
 
-    this.settings = this.loadData(this.getName(), 'settings', defaultSettings);
+    this.settings = this.loadData(DATA_NAMESPACE, 'settings', defaultSettings);
     // Force-disable automatic updates to honor user's request to remove auto-update.
     if (this.settings.autoUpdate) {
       this.settings.autoUpdate = false;
@@ -310,11 +312,11 @@ module.exports = class MessageLoggerV3 {
     if (this.settings.dontSaveData) {
       data = defaultConstruct();
     } else {
-      data = this.loadData(this.getName() + 'Data', 'data', defaultConstruct());
+      data = this.loadData(DATA_NAMESPACE + 'Data', 'data', defaultConstruct());
       const isBad = map => !(map && map.messageRecord && map.editedMessageRecord && map.deletedMessageRecord && map.purgedMessageRecord && typeof map.messageRecord == 'object' && typeof map.editedMessageRecord == 'object' && typeof map.deletedMessageRecord == 'object' && typeof map.purgedMessageRecord == 'object');
       if (isBad(data)) {
         if (this.settings.autoBackup) {
-          data = this.loadData(this.getName() + 'Data', 'data', defaultConstruct());
+          data = this.loadData(DATA_NAMESPACE + 'Data', 'data', defaultConstruct());
           if (isBad(data)) {
             BdApi.UI.showNotification({ title: this.getName(), content: `Data and backup files were corrupted. All deleted/edited/purged messages have been erased.`, duration: Infinity, type: 'error' });
             data = defaultConstruct();
@@ -1858,14 +1860,14 @@ module.exports = class MessageLoggerV3 {
     }
   }
   saveSettings() {
-    BdApi.Data.save(this.getName(), 'settings', this.settings);
+    BdApi.Data.save(DATA_NAMESPACE, 'settings', this.settings);
   }
   handleDataSaving() {
     // saveData/setPluginData is synchronous, can get slow with bigger files
     if (!this.handleDataSaving.errorPageClass) this.handleDataSaving.errorPageClass = '.' + this.getClass('errorPage');
     /* refuse saving on error page */
     if (!this.messageRecord || document.querySelector(this.handleDataSaving.errorPageClass)) return; /* did we crash? */
-    if (!Object.keys(this.messageRecord).length) return BdApi.Data.delete(this.getName() + 'Data', 'data');
+    if (!Object.keys(this.messageRecord).length) return BdApi.Data.delete(DATA_NAMESPACE + 'Data', 'data');
     const callback = err => {
       if (err) {
         BdApi.UI.showNotification({ title: this.getName(), content: 'There has been an error saving the data file', type: 'error' });
@@ -1884,7 +1886,7 @@ module.exports = class MessageLoggerV3 {
     const useEfficient = !window.ED;
     if (useEfficient) {
       this.efficientlySaveData(
-        this.getName() + 'Data',
+        DATA_NAMESPACE + 'Data',
         'data',
         {
           messageRecord: this.messageRecord,
@@ -1895,7 +1897,7 @@ module.exports = class MessageLoggerV3 {
         callback
       );
     } else {
-      BdApi.Data.save(this.getName() + 'Data', 'data', {
+      BdApi.Data.save(DATA_NAMESPACE + 'Data', 'data', {
         messageRecord: this.messageRecord,
         deletedMessageRecord: this.deletedMessageRecord,
         editedMessageRecord: this.editedMessageRecord,
@@ -1929,12 +1931,12 @@ module.exports = class MessageLoggerV3 {
       }
       this.saveBackupTimeout = 0;
       this.autoBackupSaveInterupts = 0;
-      if (!this.loadData(this.getName() + 'DataBackup', 'data').messageRecord) this.saveBackupTimeout = setTimeout(() => this.saveBackup, 300); // don't be taxing
+      if (!this.loadData(DATA_NAMESPACE + 'DataBackup', 'data').messageRecord) this.saveBackupTimeout = setTimeout(() => this.saveBackup, 300); // don't be taxing
     };
     const useEfficient = !window.ED;
     if (useEfficient) {
       this.efficientlySaveData(
-        this.getName() + 'DataBackup',
+        DATA_NAMESPACE + 'DataBackup',
         'data',
         {
           messageRecord: this.messageRecord,
@@ -1945,7 +1947,7 @@ module.exports = class MessageLoggerV3 {
         callback
       );
     } else {
-      BdApi.Data.save(this.getName() + 'DataBackup', 'data', {
+      BdApi.Data.save(DATA_NAMESPACE + 'DataBackup', 'data', {
         messageRecord: this.messageRecord,
         deletedMessageRecord: this.deletedMessageRecord,
         editedMessageRecord: this.editedMessageRecord,
