@@ -818,6 +818,11 @@ module.exports = class ShawnyHelper {
       style:
         'width:100%;padding:8px 12px;border-radius:4px;border:1px solid var(--background-modifier-accent);background:var(--background-secondary);color:var(--text-normal);font-size:13px;',
     });
+    for (const eventType of ['keydown', 'keypress', 'keyup']) {
+      userIdInput.addEventListener(eventType, (event) => {
+        event.stopPropagation();
+      });
+    }
     userIdInput.addEventListener('change', () => {
       const ids = userIdInput.value
         .split(',')
