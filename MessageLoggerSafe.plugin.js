@@ -3268,26 +3268,6 @@ module.exports = class MessageLoggerSafe {
 
     if (!MessageContent || !MemoMessage) return BdApi.UI.showNotification({ title: this.getName(), content: '[MessageLoggerV2] Failed to patch message components, edit history and deleted tint will not show!', type: 'error', duration: Infinity });
 
-    const parseContent = (() => {
-      const parse = Webpack.getByStrings('customRenderedContent', 'hideSimpleEmbedContent');
-      if (!parse) {
-        Logger.warn(this.getName(), 'Could not set up parseContent, edits will not have markdown');
-        BdApi.UI.showNotification({ title: this.getName(), content: 'Internal error: parseContent not found, edits will not have markdown!', type: 'warning' });
-        return e => e?.content;
-      }
-      return function parseContent() {
-        const ReactDispatcher = Object.values(React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE).find(e => e.useState);
-        const oUseMemo = ReactDispatcher.useMemo;
-        ReactDispatcher.useMemo = memo => memo();
-        try {
-          return parse(...arguments);
-        } finally {
-          ReactDispatcher.useMemo = oUseMemo;
-        }
-        return {};
-      }
-    })();
-
     const useStateConstant = {};
     const cloneRenderTree = node => {
       if (Array.isArray(node)) return node.map(cloneRenderTree);
@@ -3323,7 +3303,7 @@ module.exports = class MessageLoggerSafe {
 
           const result = React.createElement(() => // avoiding breaking the rules of react hooks :p
             [
-              parseContent({ channel_id: props.message.channel_id, mentionChannels: props.message.mentionChannels, content: edit.content, embeds: [], isCommandType: () => false, hasFlag: () => false }, {}).content,
+              this.tools.parse(edit.content, true, { channelId: props.message.channel_id }),
               noSuffix
                 ? null
                 : React.createElement(SuffixEdited, {
