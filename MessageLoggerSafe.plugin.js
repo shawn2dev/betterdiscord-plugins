@@ -1,6 +1,6 @@
 /**
  * @name MessageLoggerSafe
- * @version 1.10.6
+ * @version 1.10.7
  * updateUrl removed to disable automatic updates
  * @runAt idle
  */
@@ -46,7 +46,7 @@ module.exports = class MessageLoggerSafe {
     return 'MessageLoggerSafe';
   }
   getVersion() {
-    return '1.10.6';
+    return '1.10.7';
   }
   getAuthor() {
     return 'Lighty';
@@ -588,7 +588,7 @@ module.exports = class MessageLoggerSafe {
 
     this.localUser = this.UserStore.getCurrentUser();
 
-    this.ModalStack = Webpack.getByKeys("openModal");
+    this.ModalStack = Webpack.getModule(module => typeof module?.openModal === 'function' && typeof module?.closeModal === 'function', { searchExports: true });
 
     this.deletedChatMessagesCount = {};
     this.editedChatMessagesCount = {};
@@ -2616,6 +2616,7 @@ module.exports = class MessageLoggerSafe {
         shouldHideMediaOptions: true
       });
     }
+    if (!this.ModalStack) return BdApi.UI.showToast('Cannot open logs: Discord modal API is unavailable.', { type: 'error' });
     this.ModalStack.openModal(props => React.createElement(this.createModal.confirmationModal, Object.assign({}, options, props, options.onClose ? { onClose: options.onClose } : {})), { modalKey: name });
   }
   getMessageAny(id) {
@@ -3478,6 +3479,10 @@ module.exports = class MessageLoggerSafe {
     this.dispatcher.dispatch({ type: 'CONTEXT_MENU_CLOSE' });
   }
   patchModal() {
+    if (!this.ModalStack) {
+      Logger.warn(this.getName(), 'Discord modal API not found; logging remains enabled, but log windows are unavailable.');
+      return;
+    }
     let Button = null;
     try {
       const ButtonOptionsRaw = Webpack.getModule(e => {
@@ -3521,15 +3526,19 @@ module.exports = class MessageLoggerSafe {
         }
       };
     } catch { }
-    if (this.ModalStack.useModalsStore?.subscribe) {
-      this._modalsApiUnsubcribe = this.ModalStack.useModalsStore.subscribe(_ => {
-        if (this.menu.open && !this.ModalStack.hasModalOpen(this.style.menu)) {
-          this.menu.filter = '';
-          this.menu.open = false;
-          this.menu.shownMessages = -1;
-          if (this.menu.messages) this.menu.messages.length = 0;
-        }
-      });
+    if (typeof this.ModalStack.useModalsStore?.subscribe === 'function' && typeof this.ModalStack.hasModalOpen === 'function') {
+      try {
+        this._modalsApiUnsubcribe = this.ModalStack.useModalsStore.subscribe(_ => {
+          if (this.menu.open && !this.ModalStack.hasModalOpen(this.style.menu)) {
+            this.menu.filter = '';
+            this.menu.open = false;
+            this.menu.shownMessages = -1;
+            if (this.menu.messages) this.menu.messages.length = 0;
+          }
+        });
+      } catch (err) {
+        Logger.stacktrace(this.getName(), 'Could not subscribe to modal state; logging remains enabled.', err);
+      }
     }
     /*
     this.createModal.confirmationModal = class ConfirmationModal extends ZeresPluginLibrary.DiscordModules.ConfirmationModal {
