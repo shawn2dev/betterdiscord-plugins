@@ -1,6 +1,6 @@
 /**
  * @name MessageLoggerSafe
- * @version 1.10.9
+ * @version 1.10.10
  * updateUrl removed to disable automatic updates
  * @runAt idle
  */
@@ -46,7 +46,7 @@ module.exports = class MessageLoggerSafe {
     return 'MessageLoggerSafe';
   }
   getVersion() {
-    return '1.10.9';
+    return '1.10.10';
   }
   getAuthor() {
     return 'Lighty';
@@ -106,7 +106,9 @@ module.exports = class MessageLoggerSafe {
           'Forward Discord events when message logging fails without dispatching them twice.',
           'Preserve deleted messages and refs when React elements are immutable.',
           'Cancel pending message patches on shutdown and handle asynchronous failures.',
-          'Restore log window state and cancel loading when modal creation fails or the window closes.'
+          'Restore log window state and cancel loading when modal creation fails or the window closes.',
+          'Render settings without requiring Discord Text or Moment components.',
+          'Open log windows with the supported BetterDiscord modal API and keep clear/sort controls available.'
         ]
       },
       {
@@ -592,7 +594,12 @@ module.exports = class MessageLoggerSafe {
 
     this.localUser = this.UserStore.getCurrentUser();
 
-    this.ModalStack = Webpack.getModule(module => typeof module?.openModal === 'function' && typeof module?.closeModal === 'function', { searchExports: true });
+    this.ModalStack = Webpack.getModule(module => typeof module?.openModal === 'function' && typeof module?.closeModal === 'function', { searchExports: true }) || Webpack.getBySource(['?.stackNextByDefault'], {
+      map: {
+        openModal: module => typeof module === 'function' && String(module).includes('?.stackNextByDefault'),
+        closeModal: module => typeof module === 'function' && String(module).includes('.setState') && String(module).includes('.getState()[')
+      }
+    });
 
     this.deletedChatMessagesCount = {};
     this.editedChatMessagesCount = {};
@@ -913,7 +920,6 @@ module.exports = class MessageLoggerSafe {
       Logger.stacktrace(this.getName(), 'Failed to patch message components', err);
       BdApi.UI.showNotification({ title: this.getName(), content: 'Message rendering patches failed. Logging remains enabled; check the console for details.', type: 'error' });
     });
-    this.patchModal();
 
     // const createKeybindListener = () => {
     //   this.keybindListener = new (Webpack.getModule(m => typeof m === 'function' && m.toString().includes('.default.setOnInputEventCallback')))();
@@ -1278,39 +1284,29 @@ module.exports = class MessageLoggerSafe {
       button = button.nextElementSibling;
     }
 
-    const { TextElement, tools: { createMomentObject } } = this;
+    const TextElement = this.TextElement || 'span';
 
     class TimerWrapper extends React.PureComponent {
       constructor(...args) {
         super(...args);
         this.props.cbref.current = () => {
           const value = this.props.value();
-          this.moment = createMomentObject(value + this.props.time);
           this.setState({ value });
         };
         this.state = { value: this.props.value() };
-        this.moment = createMomentObject(this.state.value + this.props.time);
-      }
-      componentDidUpdate() {
-        this.moment = createMomentObject(this.state.value + this.props.time);
       }
       componentDidMount() {
-        const { moment } = this;
-        const vv = moment.clone().seconds(0).add(1, 'm').diff(moment);
-        this.timer = setInterval(() => {
-          clearInterval(this.timer);
-          this.timer = setInterval(() => this.forceUpdate(), 60 * 1000);
-          this.forceUpdate();
-        }, vv);
+        this.timer = setInterval(() => this.forceUpdate(), 60 * 1000);
       }
       componentWillUnmount() {
         if (this.timer) clearInterval(this.timer);
+        this.props.cbref.current = null;
       }
       render() {
         const { value } = this.state;
         const { after, active, inactive, time } = this.props;
         const future = (value + time);
-        return React.createElement(TextElement, {}, value ? Date.now() > future ? active : `${after}${this.moment.fromNow()}` : inactive);
+        return React.createElement(TextElement, {}, value ? Date.now() > future ? active : `${after}${new Date(future).toLocaleString()}` : inactive);
       }
     }
 
@@ -1811,8 +1807,8 @@ module.exports = class MessageLoggerSafe {
                 this.settings.userCounter.lastSubmission = val ? Date.now() : 0;
                 this.settings.userCounter.enabled = val;
                 this.saveSettings();
-                activeRef?.current();
-                lastRef?.current();
+                activeRef.current?.();
+                lastRef.current?.();
               }
             },
             {
@@ -2210,7 +2206,7 @@ module.exports = class MessageLoggerSafe {
   }
   jumpToMessage(channelId, messageId, guildId) {
     if (this.menu.open) {
-      this.ModalStack?.closeModal?.(this.style.menu);
+      this.ModalStack?.closeModal?.(this._logModalKey ?? this.style.menu);
       this.menu.open = false;
       clearTimeout(this._menuLoadTimeout);
     }
@@ -4494,7 +4490,7 @@ module.exports = class MessageLoggerSafe {
           inputDefaultMultiInputField: this.style.input,
           questionMark: this.style.questionMark,
           icon: this.style.questionMark,
-          focused: Webpack.getByKeys('focused').focused.split(/ /g),
+          focused: (Webpack.getByKeys('focused')?.focused || 'ml2-focused').split(/\s+/),
           questionMarkSingle: this.style.questionMark
         }
       } catch {
@@ -4505,7 +4501,7 @@ module.exports = class MessageLoggerSafe {
           inputDefaultMultiInputField: 'inputPrefix inputDefault' + ' ' + 'multiInputField',
           questionMark: 'questionMark',
           icon: 'questionMark',
-          focused: 'focused',
+          focused: ['focused'],
           questionMarkSingle: 'questionMark',
           __errored: true
         }
@@ -4562,7 +4558,7 @@ Pro tip: Right clicking the icon will filter the messages to the current channel
             }
           }, helpText
           ),
-          React.createElement(BdApi.Components.Button, {
+          React.createElement(BdApi.Components.Button || 'button', {
             onClick: _ => this.showLoggerHelpModal()
           }, 'Logger help'
           )
@@ -4580,14 +4576,15 @@ Pro tip: Right clicking the icon will filter the messages to the current channel
     if (this._stopped) return;
     const onClose = () => {
       this.menu.open = false;
+      this._logModalKey = null;
       this.menu.filter = '';
       this.menu.shownMessages = -1;
       if (this.menu.messages) this.menu.messages.length = 0;
       clearTimeout(this._menuLoadTimeout);
     };
-    if (typeof this.ModalStack?.openModal !== 'function' || typeof this.createModal.confirmationModal !== 'function') {
+    if (typeof BdApi.UI.showConfirmationModal !== 'function') {
       onClose();
-      BdApi.UI.showToast('Cannot open logs: Discord modal API or component is unavailable.', { type: 'error' });
+      BdApi.UI.showToast('Cannot open logs: BetterDiscord confirmation modal API is unavailable.', { type: 'error' });
       return;
     }
     if (this.menu.open) {
@@ -4611,9 +4608,9 @@ Pro tip: Right clicking the icon will filter the messages to the current channel
     const viewportHeight = document.getElementById('app-mount').getBoundingClientRect().height;
     messagesDIV.style.minHeight = viewportHeight * 0.514090909 + 'px'; // hack but ok
     //messagesDIV.style.display = 'none';
-    const onChangeOrder = el => {
+    const onChangeOrder = () => {
       this.settings.reverseOrder = !this.settings.reverseOrder;
-      el.target.innerText = 'Sort direction: ' + (!this.settings.reverseOrder ? 'new - old' : 'old - new'); // maybe a func?
+      sortButton.textContent = 'Sort direction: ' + (!this.settings.reverseOrder ? 'new - old' : 'old - new');
       this.saveSettings();
       this.refilterMessages();
     };
@@ -4658,38 +4655,27 @@ Pro tip: Right clicking the icon will filter the messages to the current channel
         });
     };
 
-    // unfortunately the BdApi.UI.showConfirmationModal doesn't support what I have in mind here, so this will have to stay
-    // more specifically, does not support overriding what the confirm and cancel buttons do entirely
-    // they inadvertently close the modal which is not the intended functionality
-    const opened = this.createModal(
+    const controls = document.createElement('div');
+    Object.assign(controls.style, { display: 'flex', flexWrap: 'wrap', gap: '8px', margin: '12px 0' });
+    controls.appendChild(this.createButton('Clear log', onClearLog));
+    const sortButton = this.createButton('Sort direction: ' + (!this.settings.reverseOrder ? 'new - old' : 'old - new'), onChangeOrder);
+    controls.appendChild(sortButton);
+    this._logModalKey = BdApi.UI.showConfirmationModal(
+      this.getName(),
+      React.createElement('div', { className: this.style.menuRoot, style: { width: '100%' } },
+        React.createElement(BdApi.ReactUtils.wrapElement([this.createTextBox(), this.createHeader(), controls, messagesDIV]))
+      ),
       {
-        confirmText: 'Clear log',
-        cancelText: 'Sort direction: ' + (!this.settings.reverseOrder ? 'new - old' : 'old - new'),
-        header: React.createElement(BdApi.ReactUtils.wrapElement([this.createTextBox(), this.createHeader()])),
-        className: this.style.menuModalLarge,
-        children: [React.createElement(BdApi.ReactUtils.wrapElement([messagesDIV]))],
-        onCancel: onChangeOrder,
-        onConfirm: onClearLog,
-        onClose,
-        ml2Data: true,
-        className: this.style.menuRoot,
-        ref: e => {
-          if (!e) return;
-          /* advanced tech! */
-          const stateNode = BdApi.Utils.getNestedValue(e, '_reactInternalFiber.return.return.stateNode.firstChild.childNodes.1.firstChild');
-          if (!stateNode) return;
-          stateNode.addEventListener(
-            'scroll',
-            this.lodash.debounce(() => {
-              this.scrollPosition = document.getElementById(this.style.menuMessages).parentElement.parentElement.parentElement.scrollTop;
-            }, 100)
-          );
-        }
-      },
-      false,
-      this.style.menu
+        size: 'large',
+        key: this.style.menu,
+        confirmText: 'Close',
+        cancelText: null,
+        onConfirm: onClose,
+        onCancel: onClose,
+        onClose
+      }
     );
-    if (opened === false || !this.menu.open) {
+    if (!this.menu.open) {
       onClose();
       return;
     }
