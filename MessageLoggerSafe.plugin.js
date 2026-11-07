@@ -1,6 +1,6 @@
 /**
  * @name MessageLoggerSafe
- * @version 1.10.10
+ * @version 1.10.11
  * updateUrl removed to disable automatic updates
  * @runAt idle
  */
@@ -46,7 +46,7 @@ module.exports = class MessageLoggerSafe {
     return 'MessageLoggerSafe';
   }
   getVersion() {
-    return '1.10.10';
+    return '1.10.11';
   }
   getAuthor() {
     return 'Lighty';
@@ -108,7 +108,9 @@ module.exports = class MessageLoggerSafe {
           'Cancel pending message patches on shutdown and handle asynchronous failures.',
           'Restore log window state and cancel loading when modal creation fails or the window closes.',
           'Render settings without requiring Discord Text or Moment components.',
-          'Open log windows with the supported BetterDiscord modal API and keep clear/sort controls available.'
+          'Open log windows with the supported BetterDiscord modal API and keep clear/sort controls available.',
+          'Restore the log icon when switching between guild channels and DMs.',
+          'Expand log windows to 90vw with a minimum width of 85vw.'
         ]
       },
       {
@@ -775,8 +777,13 @@ module.exports = class MessageLoggerSafe {
                   display: none;
                 }
 
-                .${this.style.menuModalLarge} {
-                  width: 960px;
+                .${this.style.menuModalLarge},
+                [role="dialog"]:has(.${this.style.menuRoot}),
+                .bd-modal:has(.${this.style.menuRoot}) {
+                  width: 90vw !important;
+                  min-width: 85vw !important;
+                  max-width: 95vw !important;
+                  box-sizing: border-box;
                 }
 
                 .theme-dark  .${this.style.tabSelected} {
@@ -810,7 +817,9 @@ module.exports = class MessageLoggerSafe {
                   width: 100%;
                 }
                 .${this.style.menuRoot} {
-                  width: 960px;
+                  width: 100%;
+                  min-width: 0;
+                  max-width: 100%;
                 }
                 #${this.style.filter} {
                   opacity: 1;
@@ -1048,7 +1057,7 @@ module.exports = class MessageLoggerSafe {
     });
     BdApi.UI.createTooltip(this.channelLogButton, 'Open Logs', { side: 'bottom' });
 
-    if (this.settings.showOpenLogsButton) setTimeout(() => this.addOpenLogsButton(), 1000); // I hate this.. buuut it works, at this point idk what order things are executing..
+    if (this.settings.showOpenLogsButton) this._openLogsButtonTimeout = setTimeout(() => this.addOpenLogsButton(), 1000);
 
     this.unpatches.push(
       this.Patcher.instead(MessageActions, 'deleteMessage', (_, args, original) => {
@@ -1145,6 +1154,7 @@ module.exports = class MessageLoggerSafe {
     // if (this.keybindListener) this.keybindListener.destroy();
     if (this.style && this.style.css) BdApi.DOM.removeStyle(this.style.css);
     if (this.dataManagerInterval) clearInterval(this.dataManagerInterval);
+    clearTimeout(this._openLogsButtonTimeout);
     clearTimeout(this._menuLoadTimeout);
     // if (this.keybindListenerInterval) clearInterval(this.keybindListenerInterval);
     if (this.selfTestInterval) clearInterval(this.selfTestInterval);
@@ -1204,6 +1214,7 @@ module.exports = class MessageLoggerSafe {
       }
     }
 
+    if (this.settings?.showOpenLogsButton && this.channelLogButton) this.addOpenLogsButton();
     const { addedNodes } = mutations;
     let isChat = false;
     let isTitle = false;
@@ -1225,12 +1236,7 @@ module.exports = class MessageLoggerSafe {
           }
           if (!this.selectedChannel) return Logger.warn(this.getName(), 'Chat was loaded but no text channel is selected');
           if (isTitle && this.settings.showOpenLogsButton) {
-            let srch = change.querySelector('div[class*="-search"]') || change.querySelector('div[class*="search_"]');
-            if (!srch) return Logger.warn(this.getName(), 'Observer caught title loading, but no search bar was found! Open Logs button will not show!');
-            if (this.channelLogButton && srch.parentElement) {
-              srch.parentElement.insertBefore(this.channelLogButton, srch); // memory leak..?
-            }
-            srch = null;
+            this.addOpenLogsButton();
             if (!isChat) return;
           }
           const showStuff = (map, name) => {
@@ -2273,15 +2279,16 @@ module.exports = class MessageLoggerSafe {
   /* ==================================================-|| END HELPERS ||-================================================== */
   /* ==================================================-|| START MISC ||-================================================== */
   addOpenLogsButton() {
-    if (!this.selectedChannel) return;
-    const parent = document.querySelector('div[class*="chat_"] div[class*="toolbar_"]');
-    if (!parent) return;
-    const srch = parent.querySelector('div[class*="search_"]'); // you know who you are that think this is my issue
-    if (!srch) return;
-    parent.insertBefore(this.channelLogButton, srch);
+    if (this._stopped || !this.settings?.showOpenLogsButton || !this.channelLogButton || !this.getSelectedTextChannel()) return;
+    const parent = document.querySelector('[class*="toolbar_"]:has([class*="search_"]), [class*="title_"] [class*="toolbar_"], [class*="header_"] [class*="toolbar_"], [class*="chat_"] [class*="toolbar_"]');
+    if (!parent || this.channelLogButton.parentElement === parent) return;
+    let search = parent.querySelector('[class*="search_"]');
+    while (search && search.parentElement !== parent) search = search.parentElement;
+    if (search) parent.insertBefore(this.channelLogButton, search);
+    else parent.appendChild(this.channelLogButton);
   }
   removeOpenLogsButton() {
-    this.channelLogButton.remove();
+    this.channelLogButton?.remove();
   }
   showLoggerHelpModal(initial = false) {
     BdApi.UI.showConfirmationModal('Logger help',
@@ -4666,7 +4673,7 @@ Pro tip: Right clicking the icon will filter the messages to the current channel
         React.createElement(BdApi.ReactUtils.wrapElement([this.createTextBox(), this.createHeader(), controls, messagesDIV]))
       ),
       {
-        size: 'large',
+        size: 'bd-modal-large',
         key: this.style.menu,
         confirmText: 'Close',
         cancelText: null,
