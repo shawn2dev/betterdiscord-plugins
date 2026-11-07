@@ -57,10 +57,13 @@ module.exports = class MessageLoggerSafe {
   load() { }
   start() {
     console.info('[MessageLoggerSafe] Plugin started', { version: this.getVersion() });
+    this._stopped = false;
+    clearTimeout(this._startupTimeout);
     let onLoaded = () => {
+      if (this._stopped) return;
       try {
-        if (!this.UserStore) this.UserStore = Webpack.getByKeys('getCurrentUser', 'getUser');
-        if (!this.UserStore || !(this.localUser = this.UserStore.getCurrentUser())) setTimeout(onLoaded, 1000);
+        this.UserStore = Webpack.Stores.UserStore || Webpack.getByKeys('getCurrentUser', 'getUser');
+        if (!this.UserStore || !(this.localUser = this.UserStore.getCurrentUser())) this._startupTimeout = setTimeout(onLoaded, 1000);
         else this.initialize();
       } catch (err) {
         Logger.stacktrace(this.getName(), 'Failed to start!', err);
@@ -78,6 +81,8 @@ module.exports = class MessageLoggerSafe {
     onLoaded();
   }
   stop() {
+    this._stopped = true;
+    clearTimeout(this._startupTimeout);
     try {
       this.shutdown();
       const currLocation = globalThis?.location?.pathname;
@@ -1214,6 +1219,11 @@ module.exports = class MessageLoggerSafe {
     }
   }
   getSettingsPanel() {
+    if (!this.__started || !this.settings || !this.tools || !this.createButton.classes) {
+      return React.createElement('div', { role: 'status' }, this._stopped
+        ? 'MessageLoggerSafe is not running. Enable the plugin. If startup failed, check the console for "Failed to start!".'
+        : 'MessageLoggerSafe is waiting for Discord to finish loading. Reopen settings after startup completes.');
+    }
     const div = document.createElement('div');
     div.id = this.obfuscatedClass('ml2-settings-buttonbox');
     div.style.display = 'inline-flex';
