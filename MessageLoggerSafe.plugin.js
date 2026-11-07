@@ -1,6 +1,6 @@
 /**
  * @name MessageLoggerSafe
- * @version 1.10.7
+ * @version 1.10.9
  * updateUrl removed to disable automatic updates
  * @runAt idle
  */
@@ -46,7 +46,7 @@ module.exports = class MessageLoggerSafe {
     return 'MessageLoggerSafe';
   }
   getVersion() {
-    return '1.10.7';
+    return '1.10.9';
   }
   getAuthor() {
     return 'Lighty';
@@ -59,6 +59,7 @@ module.exports = class MessageLoggerSafe {
     console.info(`[MessageLoggerSafe] Starting v${this.getVersion()}`, { file: typeof __filename === 'string' ? __filename : 'unknown', pluginFolder: BdApi.Plugins.folder });
     this._startupError = null;
     this._stopped = false;
+    this._messagePatchToken = Symbol('message-patch');
     clearTimeout(this._startupTimeout);
     let onLoaded = () => {
       if (this._stopped) return;
@@ -102,7 +103,10 @@ module.exports = class MessageLoggerSafe {
         title: 'Fixed',
         type: 'fixed',
         items: [
-          'Should no longer throw error about patching message components.. as much?',
+          'Forward Discord events when message logging fails without dispatching them twice.',
+          'Preserve deleted messages and refs when React elements are immutable.',
+          'Cancel pending message patches on shutdown and handle asynchronous failures.',
+          'Restore log window state and cancel loading when modal creation fails or the window closes.'
         ]
       },
       {
@@ -903,7 +907,12 @@ module.exports = class MessageLoggerSafe {
                 }
             `
     );
-    this.patchMessages();
+    const messagePatchToken = this._messagePatchToken;
+    this.patchMessages().catch(err => {
+      if (this._stopped || this._messagePatchToken !== messagePatchToken) return;
+      Logger.stacktrace(this.getName(), 'Failed to patch message components', err);
+      BdApi.UI.showNotification({ title: this.getName(), content: 'Message rendering patches failed. Logging remains enabled; check the console for details.', type: 'error' });
+    });
     this.patchModal();
 
     // const createKeybindListener = () => {
@@ -1005,16 +1014,26 @@ module.exports = class MessageLoggerSafe {
     );
 
     this.menu.shownMessages = -1;
-    const iconShit = Webpack.getByKeys('container', 'children', 'toolbar', 'iconWrapper');
+    const toolbarClasses = Webpack.getModule(module => typeof module?.iconWrapper === 'string' && typeof module?.icon === 'string', { searchExports: true }) || {};
     // Icon by font awesome
     // https://fontawesome.com/license
-    this.channelLogButton = this.parseHTML(`<div tabindex="0" class="${iconShit.iconWrapper} ${iconShit.clickable}" role="button">
-                                                        <svg aria-hidden="true" class="${iconShit.icon}" name="Open Logs" viewBox="0 0 576 512">
+    this.channelLogButton = this.parseHTML(`<div tabindex="0" class="${className(toolbarClasses.iconWrapper, toolbarClasses.clickable)}" role="button" aria-label="Open Logs">
+                              <svg aria-hidden="true" class="${toolbarClasses.icon || ''}" name="Open Logs" viewBox="0 0 576 512">
                                                             <path fill="currentColor" d="M218.17 424.14c-2.95-5.92-8.09-6.52-10.17-6.52s-7.22.59-10.02 6.19l-7.67 15.34c-6.37 12.78-25.03 11.37-29.48-2.09L144 386.59l-10.61 31.88c-5.89 17.66-22.38 29.53-41 29.53H80c-8.84 0-16-7.16-16-16s7.16-16 16-16h12.39c4.83 0 9.11-3.08 10.64-7.66l18.19-54.64c3.3-9.81 12.44-16.41 22.78-16.41s19.48 6.59 22.77 16.41l13.88 41.64c19.75-16.19 54.06-9.7 66 14.16 1.89 3.78 5.49 5.95 9.36 6.26v-82.12l128-127.09V160H248c-13.2 0-24-10.8-24-24V0H24C10.7 0 0 10.7 0 24v464c0 13.3 10.7 24 24 24h336c13.3 0 24-10.7 24-24v-40l-128-.11c-16.12-.31-30.58-9.28-37.83-23.75zM384 121.9c0-6.3-2.5-12.4-7-16.9L279.1 7c-4.5-4.5-10.6-7-17-7H256v128h128v-6.1zm-96 225.06V416h68.99l161.68-162.78-67.88-67.88L288 346.96zm280.54-179.63l-31.87-31.87c-9.94-9.94-26.07-9.94-36.01 0l-27.25 27.25 67.88 67.88 27.25-27.25c9.95-9.94 9.95-26.07 0-36.01z"/>
                                                         </svg>
                                                     </div>`);
+    if (!toolbarClasses.iconWrapper) {
+      Object.assign(this.channelLogButton.style, { display: 'flex', alignItems: 'center', justifyContent: 'center', width: '24px', height: '24px', flexShrink: '0', margin: '0 8px', color: 'var(--interactive-normal)', cursor: 'pointer' });
+      Object.assign(this.channelLogButton.querySelector('svg').style, { width: '20px', height: '20px' });
+      Logger.warn(this.getName(), 'Toolbar CSS module not found; using a fallback style for the log button.');
+    }
     this.channelLogButton.addEventListener('click', () => {
       this.openWindow();
+    });
+    this.channelLogButton.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      this.channelLogButton.click();
     });
     this.channelLogButton.addEventListener('contextmenu', () => {
       if (!this.selectedChannel) return;
@@ -1090,12 +1109,15 @@ module.exports = class MessageLoggerSafe {
       Logger.stacktrace(this.getName(), 'Failed to load user counter', err);
     }
 
+    console.info(`[MessageLoggerSafe] Initialization complete v${this.getVersion()}`);
     if (this.selfTestInited) return;
     this.selfTestFailures = 0;
     this.selfTestInited = true;
   }
   shutdown() {
     this.__started = false;
+    this._messagePatchToken = null;
+    if (this._cancelMessagePatch) this._cancelMessagePatch();
     const tryUnpatch = fn => {
       if (typeof fn !== 'function') return;
       try {
@@ -1117,6 +1139,7 @@ module.exports = class MessageLoggerSafe {
     // if (this.keybindListener) this.keybindListener.destroy();
     if (this.style && this.style.css) BdApi.DOM.removeStyle(this.style.css);
     if (this.dataManagerInterval) clearInterval(this.dataManagerInterval);
+    clearTimeout(this._menuLoadTimeout);
     // if (this.keybindListenerInterval) clearInterval(this.keybindListenerInterval);
     if (this.selfTestInterval) clearInterval(this.selfTestInterval);
     if (this.selfTestTimeout) clearTimeout(this.selfTestTimeout);
@@ -2186,7 +2209,11 @@ module.exports = class MessageLoggerSafe {
     this.saveData();
   }
   jumpToMessage(channelId, messageId, guildId) {
-    if (this.menu.open) this.ModalStack.closeModal(this.style.menu);
+    if (this.menu.open) {
+      this.ModalStack?.closeModal?.(this.style.menu);
+      this.menu.open = false;
+      clearTimeout(this._menuLoadTimeout);
+    }
     this.tools.transitionTo(`/channels/${guildId || '@me'}/${channelId}${messageId ? '/' + messageId : ''}`);
   }
   isImage(url) {
@@ -2616,8 +2643,12 @@ module.exports = class MessageLoggerSafe {
         shouldHideMediaOptions: true
       });
     }
-    if (!this.ModalStack) return BdApi.UI.showToast('Cannot open logs: Discord modal API is unavailable.', { type: 'error' });
+    if (typeof this.ModalStack?.openModal !== 'function' || typeof this.createModal.confirmationModal !== 'function') {
+      BdApi.UI.showToast('Cannot open logs: Discord modal API or component is unavailable.', { type: 'error' });
+      return false;
+    }
     this.ModalStack.openModal(props => React.createElement(this.createModal.confirmationModal, Object.assign({}, options, props, options.onClose ? { onClose: options.onClose } : {})), { modalKey: name });
+    return true;
   }
   getMessageAny(id) {
     const record = this.messageRecord[id];
@@ -2757,6 +2788,18 @@ module.exports = class MessageLoggerSafe {
   onDispatchEvent(args, callDefault) {
     const dispatch = args[0];
     let ret = Promise.resolve();
+    const originalDefault = callDefault;
+    let defaultCalled = false;
+    let defaultThrew = false;
+    callDefault = (...defaultArgs) => {
+      defaultCalled = true;
+      try {
+        return ret = originalDefault(...defaultArgs);
+      } catch (err) {
+        defaultThrew = true;
+        throw err;
+      }
+    };
 
     if (!dispatch) return callDefault(...args);
 
@@ -3207,7 +3250,9 @@ module.exports = class MessageLoggerSafe {
         return callDefault(...args);
       } else return callDefault(...args);
     } catch (err) {
+      if (defaultThrew) throw err;
       Logger.stacktrace(this.getName(), 'Error in onDispatchEvent', err);
+      if (!defaultCalled) return callDefault(...args);
     }
     return ret;
   }
@@ -3251,6 +3296,8 @@ module.exports = class MessageLoggerSafe {
     return domNode[Object.keys(domNode).find((key) => key.startsWith("__reactInternalInstance") || key.startsWith("__reactFiber") || key.startsWith("__reactContainer"))];
   }
   async patchMessages() {
+    const messagePatchToken = this._messagePatchToken;
+    if (this._stopped || !this.__started) return;
     const Tooltip = Webpack.getBySource('VoidTooltip cannot find DOM node', { declarationFilter: e => e.Colors && e.prototype?.shouldShowTooltip }) || (e => e.children);
     const dateFormat = Webpack.getModule(e => typeof e === 'function' && e?.toString()?.includes('sameDay'), { searchExports: true });
     //const i18n = ZeresPluginLibrary.WebpackModules.find(e => e.Messages && e.Messages.HOME);
@@ -3287,8 +3334,16 @@ module.exports = class MessageLoggerSafe {
     });
     SuffixEdited.displayName = 'SuffixEdited';
     await new Promise(res => {
-      const sub = this.subscribeToQuerySelector(() => (this.unsubscribeObserver(sub), res()), 'li[class*="messageListItem__"]');
-    })
+      if (document.querySelector('li[class*="messageListItem__"]')) return res();
+      const finish = () => {
+        this.unsubscribeObserver(sub);
+        if (this._cancelMessagePatch === finish) this._cancelMessagePatch = null;
+        res();
+      };
+      const sub = this.subscribeToQuerySelector(finish, 'li[class*="messageListItem__"]');
+      this._cancelMessagePatch = finish;
+    });
+    if (this._stopped || !this.__started || this._messagePatchToken !== messagePatchToken) return;
     const MemoMessage = Webpack.getBySource("Message must not be a thread starter message", { declarationFilter: x => String(x?.type).includes("Message must not be a thread starter message") });
     const MessageContent = Webpack.getModule(e => !!e?.type?.toString()?.match(/,\w=\w\.state===\w\.(?:\w[^.]+)\.SEND_FAILED,\w=\w\.state===\w\.(?:\w[^.]+)\.SENDING/));
 
@@ -3429,23 +3484,30 @@ module.exports = class MessageLoggerSafe {
     const messageClass = this.getSingleClass('ephemeral message');
     const _self = this;
     function Message(props, ...whatever) {
+      let ret;
       try {
-        const ret = props.__MLV2_type(props, ...whatever);
+        ret = props.__MLV2_type(props, ...whatever);
         if (!props.__MLV2_deleteTime) return ret;
-        const oRef = ret.props.children.ref;
-        ret.props.children.ref = e => {
-          if (e && !e.__tooltip) {
-            BdApi.UI.createTooltip(e, 'Deleted: ' + _self.tools.createMomentObject(props.__MLV2_deleteTime).format('LLLL'), { side: 'left' });
-            e.__tooltip = true;
+        const child = ret?.props?.children;
+        if (!React.isValidElement(ret) || !React.isValidElement(child)) return ret;
+        const oRef = Number.parseInt(React.version, 10) >= 19 ? child.props.ref : child.ref;
+        const ref = e => {
+          try {
+            if (e && !e.__tooltip) {
+              BdApi.UI.createTooltip(e, 'Deleted: ' + _self.tools.createMomentObject(props.__MLV2_deleteTime).format('LLLL'), { side: 'left' });
+              e.__tooltip = true;
+            }
+          } catch (err) {
+            Logger.stacktrace(_self.getName(), 'Failed to create deleted message tooltip', err);
           }
           if (typeof oRef === 'function') return oRef(e);
-          else if (this.lodash.isObject(oRef)) oRef.current = e;
+          if (oRef && typeof oRef === 'object') oRef.current = e;
         };
-        return ret;
+        return React.cloneElement(ret, {}, React.cloneElement(child, { ref }));
       } catch (err) {
         Logger.stacktrace(_self.getName(), 'Error in Message replacement component', err);
       }
-      return null;
+      return ret ?? null;
     }
     this.unpatches.push(
       patchMessageUpdates(MemoMessage, 'MLV2_FORCE_UPDATE_MESSAGE', (props, ret) => {
@@ -3511,7 +3573,11 @@ module.exports = class MessageLoggerSafe {
       this.createModal.confirmationModal = props => {
         try {
           const ret = confirmModal(props);
-          if (!ret) return null;
+          if (!ret) {
+            props.onClose?.();
+            Logger.warn(this.getName(), 'Confirmation modal component returned no content.');
+            return null;
+          }
           if (props.size) ret.props.size = props.size;
 
           if (props.onCancel) {
@@ -3520,8 +3586,8 @@ module.exports = class MessageLoggerSafe {
           }
           return ret;
         } catch (err) {
-          if (props.onCancel) props.onCancel();
-          else props.onClose();
+          Logger.stacktrace(this.getName(), 'Failed to render confirmation modal', err);
+          props.onClose?.();
           return null;
         }
       };
@@ -3534,6 +3600,7 @@ module.exports = class MessageLoggerSafe {
             this.menu.open = false;
             this.menu.shownMessages = -1;
             if (this.menu.messages) this.menu.messages.length = 0;
+            clearTimeout(this._menuLoadTimeout);
           }
         });
       } catch (err) {
@@ -4510,11 +4577,33 @@ Pro tip: Right clicking the icon will filter the messages to the current channel
   }
   // >>-|| MENU MODAL CREATION ||-<<
   openWindow(type) {
+    if (this._stopped) return;
+    const onClose = () => {
+      this.menu.open = false;
+      this.menu.filter = '';
+      this.menu.shownMessages = -1;
+      if (this.menu.messages) this.menu.messages.length = 0;
+      clearTimeout(this._menuLoadTimeout);
+    };
+    if (typeof this.ModalStack?.openModal !== 'function' || typeof this.createModal.confirmationModal !== 'function') {
+      onClose();
+      BdApi.UI.showToast('Cannot open logs: Discord modal API or component is unavailable.', { type: 'error' });
+      return;
+    }
     if (this.menu.open) {
       this.menu.scrollPosition = 0;
       if (type) this.openTab(type);
       return;
     }
+    try {
+      this.buildLogWindow(type, onClose);
+    } catch (err) {
+      onClose();
+      Logger.stacktrace(this.getName(), 'Failed to open log window', err);
+      BdApi.UI.showToast('Could not open the log window. Check the console for details.', { type: 'error' });
+    }
+  }
+  buildLogWindow(type, onClose) {
     this.menu.open = true;
     if (type) this.menu.selectedTab = type;
     if (!this.menu.selectedTab) this.menu.selectedTab = 'deleted';
@@ -4572,7 +4661,7 @@ Pro tip: Right clicking the icon will filter the messages to the current channel
     // unfortunately the BdApi.UI.showConfirmationModal doesn't support what I have in mind here, so this will have to stay
     // more specifically, does not support overriding what the confirm and cancel buttons do entirely
     // they inadvertently close the modal which is not the intended functionality
-    this.createModal(
+    const opened = this.createModal(
       {
         confirmText: 'Clear log',
         cancelText: 'Sort direction: ' + (!this.settings.reverseOrder ? 'new - old' : 'old - new'),
@@ -4581,7 +4670,7 @@ Pro tip: Right clicking the icon will filter the messages to the current channel
         children: [React.createElement(BdApi.ReactUtils.wrapElement([messagesDIV]))],
         onCancel: onChangeOrder,
         onConfirm: onClearLog,
-        onClose: _ => { },
+        onClose,
         ml2Data: true,
         className: this.style.menuRoot,
         ref: e => {
@@ -4600,8 +4689,13 @@ Pro tip: Right clicking the icon will filter the messages to the current channel
       false,
       this.style.menu
     );
+    if (opened === false || !this.menu.open) {
+      onClose();
+      return;
+    }
     let loadAttempts = 0;
     const loadMessages = () => {
+      if (this._stopped || !this.menu.open) return;
       loadAttempts++;
       try {
         this.refilterMessages();
@@ -4611,10 +4705,10 @@ Pro tip: Right clicking the icon will filter the messages to the current channel
           Logger.stacktrace(this.getName(), 'Failed loading menu', e);
           return;
         }
-        setTimeout(loadMessages, 100);
+        this._menuLoadTimeout = setTimeout(loadMessages, 100);
       }
     };
-    setTimeout(loadMessages, 100);
+    this._menuLoadTimeout = setTimeout(loadMessages, 100);
   }
   /* ==================================================-|| END MENU ||-================================================== */
   /* ==================================================-|| START CONTEXT MENU ||-================================================== */
