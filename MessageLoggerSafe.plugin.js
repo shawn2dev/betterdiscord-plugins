@@ -530,13 +530,16 @@ module.exports = class MessageLoggerSafe {
       }
     };
 
+    const markupClass = Webpack.getModule(module => typeof module?.markup === 'string' && module.markup.trim().length > 0, { searchExports: true })?.markup || 'markup-MLV2';
+    if (markupClass === 'markup-MLV2') Logger.warn(this.getName(), 'Markup CSS module not found; using a fallback class for log messages.');
+
     this.multiClasses = {
       defaultColor: getClass('defaultColor'),
       get edited() {
         delete this.edited;
         return this.edited = className(getClass('separator timestamp'), getClass('separator timestampInline'));
       },
-      markup: Webpack.getByKeys('markup')['markup'],
+      markup: markupClass,
       message: {
         cozy: {
           containerBounded: this.safeGetClass(() => getClass('containerCozyBounded', true), 'containerCozyBounded'),
@@ -551,7 +554,7 @@ module.exports = class MessageLoggerSafe {
     };
 
     this.classes = {
-      markup: this.getSingleClass('markup'),
+      markup: markupClass.split(' ')[0],
       hidden: this.getSingleClass('spoilerContent hidden'),
       /* messages: this.safeGetClass(
         () => `.${Webpack.getByKeys('container', 'containerCompactBounded').container.split(/ /g)[0]} > div:not(.${Webpack.getByKeys('content', 'marginCompactIndent').content.split(/ /g)[0]})`,
