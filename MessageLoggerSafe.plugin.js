@@ -1,6 +1,6 @@
 /**
  * @name MessageLoggerSafe
- * @version 1.10.5
+ * @version 1.10.6
  * updateUrl removed to disable automatic updates
  * @runAt idle
  */
@@ -46,7 +46,7 @@ module.exports = class MessageLoggerSafe {
     return 'MessageLoggerSafe';
   }
   getVersion() {
-    return '1.10.5';
+    return '1.10.6';
   }
   getAuthor() {
     return 'Lighty';
@@ -56,7 +56,8 @@ module.exports = class MessageLoggerSafe {
   }
   load() { }
   start() {
-    console.info('[MessageLoggerSafe] Plugin started', { version: this.getVersion() });
+    console.info(`[MessageLoggerSafe] Starting v${this.getVersion()}`, { file: typeof __filename === 'string' ? __filename : 'unknown', pluginFolder: BdApi.Plugins.folder });
+    this._startupError = null;
     this._stopped = false;
     clearTimeout(this._startupTimeout);
     let onLoaded = () => {
@@ -66,6 +67,8 @@ module.exports = class MessageLoggerSafe {
         if (!this.UserStore || !(this.localUser = this.UserStore.getCurrentUser())) this._startupTimeout = setTimeout(onLoaded, 1000);
         else this.initialize();
       } catch (err) {
+        this._startupError = err;
+        console.error(`[MessageLoggerSafe] Startup failed v${this.getVersion()}`, err);
         Logger.stacktrace(this.getName(), 'Failed to start!', err);
         Logger.error(this.getName(), `If you cannot solve this yourself, contact ${this.getAuthor()} and provide the errors shown here.`);
         this.stop();
@@ -530,7 +533,13 @@ module.exports = class MessageLoggerSafe {
       }
     };
 
-    const markupClass = Webpack.getModule(module => typeof module?.markup === 'string' && module.markup.trim().length > 0, { searchExports: true })?.markup || 'markup-MLV2';
+    let markupClass = 'markup-MLV2';
+    try {
+      const cssModule = Webpack.getModule(module => typeof module?.markup === 'string' && module.markup.trim().length > 0, { searchExports: true });
+      if (typeof cssModule?.markup === 'string' && cssModule.markup.trim()) markupClass = cssModule.markup.trim();
+    } catch (err) {
+      Logger.stacktrace(this.getName(), 'Markup CSS lookup failed; continuing with a fallback class.', err);
+    }
     if (markupClass === 'markup-MLV2') Logger.warn(this.getName(), 'Markup CSS module not found; using a fallback class for log messages.');
 
     this.multiClasses = {
@@ -554,7 +563,7 @@ module.exports = class MessageLoggerSafe {
     };
 
     this.classes = {
-      markup: markupClass.split(' ')[0],
+      markup: markupClass.split(/\s+/)[0],
       hidden: this.getSingleClass('spoilerContent hidden'),
       /* messages: this.safeGetClass(
         () => `.${Webpack.getByKeys('container', 'containerCompactBounded').container.split(/ /g)[0]} > div:not(.${Webpack.getByKeys('content', 'marginCompactIndent').content.split(/ /g)[0]})`,
@@ -1222,6 +1231,9 @@ module.exports = class MessageLoggerSafe {
     }
   }
   getSettingsPanel() {
+    if (this._startupError) {
+      return React.createElement('div', { role: 'alert' }, `MessageLoggerSafe v${this.getVersion()} failed to start: ${this._startupError.message || String(this._startupError)}`);
+    }
     if (!this.__started || !this.settings || !this.tools || !this.createButton.classes) {
       return React.createElement('div', { role: 'status' }, this._stopped
         ? 'MessageLoggerSafe is not running. Enable the plugin. If startup failed, check the console for "Failed to start!".'
