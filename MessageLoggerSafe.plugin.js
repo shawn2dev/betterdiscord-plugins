@@ -1,6 +1,6 @@
 /**
  * @name MessageLoggerSafe
- * @version 1.10.11
+ * @version 1.10.12
  * updateUrl removed to disable automatic updates
  * @runAt idle
  */
@@ -46,7 +46,7 @@ module.exports = class MessageLoggerSafe {
     return 'MessageLoggerSafe';
   }
   getVersion() {
-    return '1.10.11';
+    return '1.10.12';
   }
   getAuthor() {
     return 'Lighty';
@@ -60,6 +60,7 @@ module.exports = class MessageLoggerSafe {
     this._startupError = null;
     this._stopped = false;
     this._messagePatchToken = Symbol('message-patch');
+    this._messageRenderingPatched = false;
     clearTimeout(this._startupTimeout);
     let onLoaded = () => {
       if (this._stopped) return;
@@ -110,7 +111,11 @@ module.exports = class MessageLoggerSafe {
           'Render settings without requiring Discord Text or Moment components.',
           'Open log windows with the supported BetterDiscord modal API and keep clear/sort controls available.',
           'Restore the log icon when switching between guild channels and DMs.',
-          'Expand log windows to 90vw with a minimum width of 85vw.'
+          'Expand log windows to 90vw with a minimum width of 85vw.',
+          'Record partial message edits and deletions without depending on internal mention helpers.',
+          'Use the MessageStore dispatcher and updated memo/forwardRef component discovery.',
+          'Render edit history and deleted messages when Discord CSS and Tooltip modules are unavailable.',
+          'Restore deleted messages when a channel has no remaining messages.'
         ]
       },
       {
@@ -503,7 +508,6 @@ module.exports = class MessageLoggerSafe {
       })
     );
 
-    const isMentioned = Webpack.getModule(e => typeof e === 'function' && e?.toString()?.includes('mentionEveryone') && e?.toString()?.includes('roles.includes'), { searchExports: true });
     const MessageActions = Webpack.getByKeys('fetchMessages', 'jumpToMessage');
 
     this.tools = {
@@ -519,7 +523,7 @@ module.exports = class MessageLoggerSafe {
       getUserAsync: /* Webpack.getByKeys('getUser', 'acceptAgreements').getUser */ () => Promise.resolve(),
       isBlocked: Webpack.getByKeys('isBlocked').isBlocked,
       createMomentObject: Webpack.getByKeys('createFromInputFallback'),
-      isMentioned: (e, id) => isMentioned({ userId: id, channelId: e.channel_id, mentionEveryone: e.mentionEveryone || e.mention_everyone, mentionUsers: e.mentions.map(e => e.id || e), mentionRoles: e.mentionRoles || e.mention_roles, mentionGames: [] }),
+      isMentioned: (message, userId) => this.isMessageMentioned(message, userId),
     };
 
     const { getClass } = this;
@@ -648,7 +652,7 @@ module.exports = class MessageLoggerSafe {
 
     // unsure if this will stay functional, but last time I checked this ONLY returns the correct dispatcher since this specific filter
     // only matches all stores that use the main dispatcher
-    this.dispatcher = Webpack.getByKeys('_dispatcher')?._dispatcher;
+    this.dispatcher = this.messageStore._dispatcher || this.UserStore._dispatcher || Webpack.getByKeys('_dispatcher')?._dispatcher;
 
     // FIX: Discord's webpack layout has changed and the lookup above can now resolve to a
     // stale/incorrect object (e.g. one missing '_waitQueue' etc.), which broke the dispatch
@@ -664,7 +668,7 @@ module.exports = class MessageLoggerSafe {
       }
     }
 
-    if (!this.dispatcher) {
+    if (!isLikelyDispatcher(this.dispatcher)) {
       Logger.error(this.getName(), 'Failed to find Dispatcher!');
       BdApi.UI.showNotification({ title: this.getName(), content: 'Failed to start plugin! Critical error: dispatcher not found!', duration: Infinity, type: 'error' });
       return;
@@ -729,6 +733,7 @@ module.exports = class MessageLoggerSafe {
     BdApi.DOM.addStyle(
       (this.style.css = !this.settings.obfuscateCSSClasses ? 'ML2-CSS' : this.randomString()),
       `
+                .${this.style.deleted} [id^="message-content-"], .${this.style.deleted} [id^="message-content-"] .hljs,
                 .${this.style.deleted} .${this.classes.markup}, .${this.style.deleted} .${this.classes.markup} .hljs, .${this.style.deleted} .container-1ov-mD *{
                     color: #f04747 !important;
                 }
@@ -740,6 +745,9 @@ module.exports = class MessageLoggerSafe {
                 }
                 .theme-dark .${this.classes.markup}.${this.style.edited} .${this.style.edited} {
                     filter: brightness(70%);
+                }
+                .theme-dark [id^="message-content-"].${this.style.edited} .${this.style.edited} {
+                  filter: brightness(70%);
                 }
                 .theme-light .${this.classes.markup}.${this.style.edited} .${this.style.edited} {
                     opacity: 0.5;
@@ -1131,6 +1139,7 @@ module.exports = class MessageLoggerSafe {
   }
   shutdown() {
     this.__started = false;
+    this._messageRenderingPatched = false;
     this._messagePatchToken = null;
     if (this._cancelMessagePatch) this._cancelMessagePatch();
     const tryUnpatch = fn => {
@@ -2052,6 +2061,15 @@ module.exports = class MessageLoggerSafe {
     /* DEPRECATED */
     return this.messageRecord[id];
   }
+  isMessageMentioned(message, userId) {
+    if (message.mentionEveryone || message.mention_everyone) return true;
+    if ((message.mentions || []).some(user => (user.id || user) === userId)) return true;
+    const mentionedRoles = message.mentionRoles || message.mention_roles || [];
+    if (!mentionedRoles.length) return false;
+    const guildId = message.guild_id || this.ChannelStore.getChannel(message.channel_id)?.guild_id;
+    const memberRoles = Webpack.Stores.GuildMemberStore?.getMember?.(guildId, userId)?.roles || [];
+    return mentionedRoles.some(roleId => memberRoles.includes(roleId));
+  }
   cleanupUserObject(user) {
     /* backported from MLV2 rewrite */
     return {
@@ -2481,7 +2499,14 @@ module.exports = class MessageLoggerSafe {
    specified index
   */
   reAddDeletedMessages(messages, deletedMessages, channelStart, channelEnd) {
-    if (!messages.length || !deletedMessages.length) return;
+    if (!deletedMessages.length) return;
+    if (!messages.length) {
+      if (!channelStart && !channelEnd) return;
+      const restored = deletedMessages.map(id => this.messageRecord[id]).filter(record => record?.delete_data && !record.delete_data.hidden).map(record => record.message);
+      restored.sort((left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime());
+      messages.push(...restored);
+      return;
+    }
     const DISCORD_EPOCH = 14200704e5;
     const IDs = [];
     const savedIDs = [];
@@ -2789,7 +2814,7 @@ module.exports = class MessageLoggerSafe {
   }
   /* ==================================================-|| END MESSAGE MANAGMENT ||-================================================== */
   onDispatchEvent(args, callDefault) {
-    const dispatch = args[0];
+    let dispatch = args[0];
     let ret = Promise.resolve();
     const originalDefault = callDefault;
     let defaultCalled = false;
@@ -2825,6 +2850,12 @@ module.exports = class MessageLoggerSafe {
 
       if (dispatch.type !== 'MESSAGE_CREATE' && dispatch.type !== 'MESSAGE_DELETE' && dispatch.type !== 'MESSAGE_DELETE_BULK' && dispatch.type !== 'MESSAGE_UPDATE' && dispatch.type !== 'LOAD_MESSAGES_SUCCESS') return callDefault(...args);
 
+      if (dispatch.type === 'MESSAGE_UPDATE' && dispatch.message) {
+        const channelId = dispatch.message.channel_id || dispatch.channelId;
+        const previous = this.getEditedMessage(dispatch.message.id, channelId)?.message || this.getCachedMessage(dispatch.message.id, channelId);
+        dispatch = { ...dispatch, message: { ...previous, ...dispatch.message, channel_id: channelId } };
+      }
+
       // console.log('INFO: onDispatchEvent -> dispatch', dispatch);
 
       if (dispatch.message && (dispatch.message.type !== 0 && dispatch.message.type !== 19 && (dispatch.message.type !== 20 || (dispatch.message.flags & 64) === 64))) return callDefault(...args); // anti other shit 1
@@ -2833,12 +2864,12 @@ module.exports = class MessageLoggerSafe {
       if (!channel) return callDefault(...args);
       const guild = channel.guild_id ? this.tools.getServer(channel.guild_id) : false;
 
-      let author = dispatch.message && dispatch.message.author ? this.tools.getUser(dispatch.message.author.id) : false;
-      if (!author) author = (this.channelMessages[channel.id]?.get(dispatch.message?.id || dispatch.id) || {}).author;
+      let author = dispatch.message && dispatch.message.author ? this.tools.getUser(dispatch.message.author.id) || dispatch.message.author : false;
+      if (!author) author = this.channelMessages[channel.id]?.get?.(dispatch.message?.id || dispatch.id)?.author;
       if (!author) {
         // last ditch attempt
         let message = this.getCachedMessage(dispatch.message?.id || dispatch.id, channel.id);
-        if (message) author = this.tools.getUser(message.author.id);
+        if (message) author = this.tools.getUser(message.author.id) || message.author;
       }
 
       if (!author && !(dispatch.type == 'LOAD_MESSAGES_SUCCESS' || dispatch.type == 'MESSAGE_DELETE_BULK')) return callDefault(...args);
@@ -3301,8 +3332,8 @@ module.exports = class MessageLoggerSafe {
   async patchMessages() {
     const messagePatchToken = this._messagePatchToken;
     if (this._stopped || !this.__started) return;
-    const Tooltip = Webpack.getBySource('VoidTooltip cannot find DOM node', { declarationFilter: e => e.Colors && e.prototype?.shouldShowTooltip }) || (e => e.children);
-    const dateFormat = Webpack.getModule(e => typeof e === 'function' && e?.toString()?.includes('sameDay'), { searchExports: true });
+    const Tooltip = Webpack.getBySource('VoidTooltip cannot find DOM node', { declarationFilter: e => e.Colors && e.prototype?.shouldShowTooltip }) || (props => typeof props.children === 'function' ? props.children({}) : props.children);
+    const dateFormat = Webpack.getModule(e => typeof e === 'function' && e?.toString()?.includes('sameDay'), { searchExports: true }) || (timestamp => new Date(timestamp).toLocaleString());
     //const i18n = ZeresPluginLibrary.WebpackModules.find(e => e.Messages && e.Messages.HOME);
     /* suck it you retarded asshole devilfuck */
     const SuffixEdited = React.memo(e => {
@@ -3347,8 +3378,12 @@ module.exports = class MessageLoggerSafe {
       this._cancelMessagePatch = finish;
     });
     if (this._stopped || !this.__started || this._messagePatchToken !== messagePatchToken) return;
-    const MemoMessage = Webpack.getBySource("Message must not be a thread starter message", { declarationFilter: x => String(x?.type).includes("Message must not be a thread starter message") });
-    const MessageContent = Webpack.getModule(e => !!e?.type?.toString()?.match(/,\w=\w\.state===\w\.(?:\w[^.]+)\.SEND_FAILED,\w=\w\.state===\w\.(?:\w[^.]+)\.SENDING/));
+    const componentFunction = component => typeof component?.type === 'function' ? component.type : typeof component?.render === 'function' ? component.render : null;
+    const MemoMessage = Webpack.getModule(component => componentFunction(component)?.toString().includes('Message must not be a thread starter message'), { searchExports: true });
+    const MessageContent = Webpack.getModule(component => {
+      const source = componentFunction(component)?.toString() || '';
+      return source.includes('message-content-') || (source.includes('SEND_FAILED') && source.includes('SENDING'));
+    }, { searchExports: true });
 
     if (!MessageContent || !MemoMessage) return BdApi.UI.showNotification({ title: this.getName(), content: '[MessageLoggerV2] Failed to patch message components, edit history and deleted tint will not show!', type: 'error', duration: Infinity });
 
@@ -3372,7 +3407,7 @@ module.exports = class MessageLoggerSafe {
         const rendered = cloneRenderTree(result);
         return decorate(messageProps, rendered, forceUpdate) ?? rendered;
       }
-      return this.Patcher.after(component, 'type', (_, [props], ret) =>
+      return this.Patcher.after(component, typeof component.type === 'function' ? 'type' : 'render', (_, [props], ret) =>
         React.createElement(MessageUpdates, { messageProps: props, result: ret })
       );
     };
@@ -3381,7 +3416,7 @@ module.exports = class MessageLoggerSafe {
         if ((typeof props.className === 'string' && ~props.className.indexOf('repliedTextContent'))) return;
         if (!this.editedMessageRecord[props.message.channel_id] || this.editedMessageRecord[props.message.channel_id].indexOf(props.message.id) === -1) return;
         const record = this.messageRecord[props.message.id];
-        if (!record || !Array.isArray(ret?.props?.children)) return;
+        if (!record || !ret?.props) return;
         const createEditedMessage = (edit, editNum, options = { isSingular: false, noSuffix: false, hasMore: 'none', numHidden: 0 }) => {
           const { isSingular = false, noSuffix = false, hasMore = 'none', numHidden = 0 } = options;
 
@@ -3430,12 +3465,12 @@ module.exports = class MessageLoggerSafe {
         };
         ret.props.className = className(ret.props.className, this.style.edited);
         const modifier = this.editModifiers[props.message.id];
-        if (modifier?.editNum) {
+        if (Number.isInteger(modifier?.editNum)) {
           ret.props.children = [createEditedMessage(record.edit_history[modifier.editNum], -1, { isSingular: true, noSuffix: modifier.noSuffix })];
           return;
         }
 
-        const oContent = Array.isArray(ret.props.children[0]) ? ret.props.children[0] : ret.props.children[1];
+        const oContent = Array.isArray(ret.props.children) && Array.isArray(ret.props.children[0]) ? ret.props.children[0] : ret.props.children;
 
         if ((!this.settings.showEditedMessages && !modifier?.showAllEdits) || record.edits_hidden) {
           ret.props.children = [
@@ -3497,7 +3532,7 @@ module.exports = class MessageLoggerSafe {
         const ref = e => {
           try {
             if (e && !e.__tooltip) {
-              BdApi.UI.createTooltip(e, 'Deleted: ' + _self.tools.createMomentObject(props.__MLV2_deleteTime).format('LLLL'), { side: 'left' });
+              BdApi.UI.createTooltip(e, 'Deleted: ' + new Date(props.__MLV2_deleteTime).toLocaleString(), { side: 'left' });
               e.__tooltip = true;
             }
           } catch (err) {
@@ -3519,14 +3554,25 @@ module.exports = class MessageLoggerSafe {
         if (props.message.editedTimestamp) record.message.edited_timestamp = new Date(props.message.editedTimestamp).getTime();
         if (!record.delete_data) return;
         if (this.noTintIds.indexOf(props.message.id) !== -1) return;
-        const message = this.findInReactTree(ret, e => e && typeof e?.props?.className === 'string' && ~e?.props?.className?.split(' ').indexOf(messageClass));
+        const message = this.findInReactTree(ret, element => {
+          if (typeof element?.props?.className !== 'string') return false;
+          return (messageClass && element.props.className.split(/\s+/).includes(messageClass)) ||
+            element.props.id === `chat-messages-${props.message.channel_id}-${props.message.id}` ||
+            element.props['data-message-id'] === props.message.id;
+        }) || (typeof ret?.props?.className === 'string' ? ret : null);
         if (!message) return;
         message.props.className += ' ' + (this.settings.useAlternativeDeletedStyle ? this.style.deletedAlt : this.style.deleted);
-        message.props.__MLV2_deleteTime = record.delete_data.time;
-        message.props.__MLV2_type = message.type;
-        message.type = Message;
+        if (typeof message.type === 'function') {
+          message.props.__MLV2_deleteTime = record.delete_data.time;
+          message.props.__MLV2_type = message.type;
+          message.type = Message;
+        } else {
+          message.props.title = 'Deleted: ' + new Date(record.delete_data.time).toLocaleString();
+        }
       })
     );
+    this._messageRenderingPatched = true;
+    console.info(`[MessageLoggerSafe] Message rendering patches active v${this.getVersion()}`);
     this.forceReloadMessages();
   }
   forceReloadMessages() {
