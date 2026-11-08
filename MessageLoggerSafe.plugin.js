@@ -1,6 +1,6 @@
 /**
  * @name MessageLoggerSafe
- * @version 1.10.13
+ * @version 1.10.14
  * updateUrl removed to disable automatic updates
  * @runAt idle
  */
@@ -46,7 +46,7 @@ module.exports = class MessageLoggerSafe {
     return 'MessageLoggerSafe';
   }
   getVersion() {
-    return '1.10.13';
+    return '1.10.14';
   }
   getAuthor() {
     return 'Lighty';
@@ -117,7 +117,8 @@ module.exports = class MessageLoggerSafe {
           'Render edit history and deleted messages when Discord CSS and Tooltip modules are unavailable.',
           'Restore deleted messages when a channel has no remaining messages.',
           'Decorate mounted chat rows and render edit history without relying on Discord component exports.',
-          'Restore deleted text color and attachment grayscale without requiring avatar or markup CSS modules.'
+          'Restore deleted text color and attachment grayscale without requiring avatar or markup CSS modules.',
+          'Apply the edit-history text color explicitly instead of inheriting black from Discord markup.'
         ]
       },
       {
@@ -747,6 +748,10 @@ module.exports = class MessageLoggerSafe {
                 }
                 html #app-mount .${this.style.deletedAlt}:hover, html #app-mount .${this.style.deletedAlt}.selected-2P5D_Z {
                   background-color: rgba(240, 71, 71, 0.10) !important;
+                }
+                .${this.style.edited}[editnum], .${this.style.edited}[editnum] *,
+                [data-mlv2-edit-history] .${this.style.edited}, [data-mlv2-edit-history] .${this.style.edited} * {
+                  color: #f04747 !important;
                 }
                 .theme-dark .${this.classes.markup}.${this.style.edited} .${this.style.edited} {
                     filter: brightness(70%);
