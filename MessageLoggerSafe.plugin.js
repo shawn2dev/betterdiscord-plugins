@@ -1,6 +1,6 @@
 /**
  * @name MessageLoggerSafe
- * @version 1.10.12
+ * @version 1.10.13
  * updateUrl removed to disable automatic updates
  * @runAt idle
  */
@@ -46,7 +46,7 @@ module.exports = class MessageLoggerSafe {
     return 'MessageLoggerSafe';
   }
   getVersion() {
-    return '1.10.12';
+    return '1.10.13';
   }
   getAuthor() {
     return 'Lighty';
@@ -115,7 +115,9 @@ module.exports = class MessageLoggerSafe {
           'Record partial message edits and deletions without depending on internal mention helpers.',
           'Use the MessageStore dispatcher and updated memo/forwardRef component discovery.',
           'Render edit history and deleted messages when Discord CSS and Tooltip modules are unavailable.',
-          'Restore deleted messages when a channel has no remaining messages.'
+          'Restore deleted messages when a channel has no remaining messages.',
+          'Decorate mounted chat rows and render edit history without relying on Discord component exports.',
+          'Restore deleted text color and attachment grayscale without requiring avatar or markup CSS modules.'
         ]
       },
       {
@@ -733,7 +735,10 @@ module.exports = class MessageLoggerSafe {
     BdApi.DOM.addStyle(
       (this.style.css = !this.settings.obfuscateCSSClasses ? 'ML2-CSS' : this.randomString()),
       `
-                .${this.style.deleted} [id^="message-content-"], .${this.style.deleted} [id^="message-content-"] .hljs,
+                .${this.style.deleted} [id^="message-content-"], .${this.style.deleted} [id^="message-content-"] *,
+                .${this.style.deleted} [data-mlv2-edit-history], .${this.style.deleted} [data-mlv2-edit-history] * {
+                  color: #f04747 !important;
+                }
                 .${this.style.deleted} .${this.classes.markup}, .${this.style.deleted} .${this.classes.markup} .hljs, .${this.style.deleted} .container-1ov-mD *{
                     color: #f04747 !important;
                 }
@@ -749,6 +754,12 @@ module.exports = class MessageLoggerSafe {
                 .theme-dark [id^="message-content-"].${this.style.edited} .${this.style.edited} {
                   filter: brightness(70%);
                 }
+                .theme-dark [data-mlv2-edit-history] .${this.style.edited} {
+                  filter: brightness(70%);
+                }
+                .theme-light [data-mlv2-edit-history] .${this.style.edited} {
+                  opacity: 0.5;
+                }
                 .theme-light .${this.classes.markup}.${this.style.edited} .${this.style.edited} {
                     opacity: 0.5;
                 }
@@ -762,11 +773,14 @@ module.exports = class MessageLoggerSafe {
                     text-indent: 0;
                 }
 
-                .theme-dark .${this.style.deleted}:not(:hover) img:not(.${this.classes.avatar}), .${this.style.deleted}:not(:hover) .mention, .${this.style.deleted}:not(:hover) .reactions, .${this.style.deleted}:not(:hover) a {
+                .${this.style.deleted}:not(:hover) img:not([class*="avatar"]), .${this.style.deleted}:not(:hover) video,
+                .${this.style.deleted}:not(:hover) [id^="message-accessories-"], .${this.style.deleted}:not(:hover) [class*="attachment"],
+                .${this.style.deleted}:not(:hover) .mention, .${this.style.deleted}:not(:hover) .reactions, .${this.style.deleted}:not(:hover) a {
                     filter: grayscale(100%) !important;
                 }
 
-                .${this.style.deleted} img:not(.${this.classes.avatar}), .${this.style.deleted} .mention, .${this.style.deleted} .reactions, .${this.style.deleted} a {
+                .${this.style.deleted} img:not([class*="avatar"]), .${this.style.deleted} video, .${this.style.deleted} [id^="message-accessories-"],
+                .${this.style.deleted} [class*="attachment"], .${this.style.deleted} .mention, .${this.style.deleted} .reactions, .${this.style.deleted} a {
                     transition: filter 0.3s !important;
                 }
 
@@ -3332,6 +3346,7 @@ module.exports = class MessageLoggerSafe {
   async patchMessages() {
     const messagePatchToken = this._messagePatchToken;
     if (this._stopped || !this.__started) return;
+    this.patchChatDom();
     const Tooltip = Webpack.getBySource('VoidTooltip cannot find DOM node', { declarationFilter: e => e.Colors && e.prototype?.shouldShowTooltip }) || (props => typeof props.children === 'function' ? props.children({}) : props.children);
     const dateFormat = Webpack.getModule(e => typeof e === 'function' && e?.toString()?.includes('sameDay'), { searchExports: true }) || (timestamp => new Date(timestamp).toLocaleString());
     //const i18n = ZeresPluginLibrary.WebpackModules.find(e => e.Messages && e.Messages.HOME);
@@ -3368,13 +3383,13 @@ module.exports = class MessageLoggerSafe {
     });
     SuffixEdited.displayName = 'SuffixEdited';
     await new Promise(res => {
-      if (document.querySelector('li[class*="messageListItem__"]')) return res();
+      if (document.querySelector('[id^="chat-messages-"], [data-list-item-id^="chat-messages___"]')) return res();
       const finish = () => {
         this.unsubscribeObserver(sub);
         if (this._cancelMessagePatch === finish) this._cancelMessagePatch = null;
         res();
       };
-      const sub = this.subscribeToQuerySelector(finish, 'li[class*="messageListItem__"]');
+      const sub = this.subscribeToQuerySelector(finish, '[id^="chat-messages-"], [data-list-item-id^="chat-messages___"]');
       this._cancelMessagePatch = finish;
     });
     if (this._stopped || !this.__started || this._messagePatchToken !== messagePatchToken) return;
@@ -3385,7 +3400,10 @@ module.exports = class MessageLoggerSafe {
       return source.includes('message-content-') || (source.includes('SEND_FAILED') && source.includes('SENDING'));
     }, { searchExports: true });
 
-    if (!MessageContent || !MemoMessage) return BdApi.UI.showNotification({ title: this.getName(), content: '[MessageLoggerV2] Failed to patch message components, edit history and deleted tint will not show!', type: 'error', duration: Infinity });
+    if (!MessageContent || !MemoMessage) {
+      Logger.warn(this.getName(), 'Discord message components unavailable; using native chat decorations.');
+      return;
+    }
 
     const useStateConstant = {};
     const cloneRenderTree = node => {
@@ -3417,6 +3435,8 @@ module.exports = class MessageLoggerSafe {
         if (!this.editedMessageRecord[props.message.channel_id] || this.editedMessageRecord[props.message.channel_id].indexOf(props.message.id) === -1) return;
         const record = this.messageRecord[props.message.id];
         if (!record || !ret?.props) return;
+        const content = this.findInReactTree(ret, element => typeof element?.type === 'string' && element.props?.id === `message-content-${props.message.id}`) || (typeof ret.type === 'string' ? ret : null);
+        if (!content || content.props['data-mlv2-edit-history']) return;
         const createEditedMessage = (edit, editNum, options = { isSingular: false, noSuffix: false, hasMore: 'none', numHidden: 0 }) => {
           const { isSingular = false, noSuffix = false, hasMore = 'none', numHidden = 0 } = options;
 
@@ -3463,17 +3483,17 @@ module.exports = class MessageLoggerSafe {
             )
           );
         };
-        ret.props.className = className(ret.props.className, this.style.edited);
+        content.props.className = className(content.props.className, this.style.edited);
         const modifier = this.editModifiers[props.message.id];
         if (Number.isInteger(modifier?.editNum)) {
-          ret.props.children = [createEditedMessage(record.edit_history[modifier.editNum], -1, { isSingular: true, noSuffix: modifier.noSuffix })];
+          content.props.children = [createEditedMessage(record.edit_history[modifier.editNum], -1, { isSingular: true, noSuffix: modifier.noSuffix })];
           return;
         }
 
-        const oContent = Array.isArray(ret.props.children) && Array.isArray(ret.props.children[0]) ? ret.props.children[0] : ret.props.children;
+        const oContent = Array.isArray(content.props.children) && Array.isArray(content.props.children[0]) ? content.props.children[0] : content.props.children;
 
         if ((!this.settings.showEditedMessages && !modifier?.showAllEdits) || record.edits_hidden) {
-          ret.props.children = [
+          content.props.children = [
             oContent,
             React.createElement(SuffixEdited, {
               timestamp: new Date(props.message.editedTimestamp),
@@ -3515,7 +3535,7 @@ module.exports = class MessageLoggerSafe {
           let editNum = i;
           edits.push(createEditedMessage(edit, editNum, i === hasMoreIdx ? { hasMore, numHidden } : {}));
         }
-        ret.props.children = [edits, oContent];
+        content.props.children = [edits, oContent];
       })
     );
 
@@ -3574,6 +3594,107 @@ module.exports = class MessageLoggerSafe {
     this._messageRenderingPatched = true;
     console.info(`[MessageLoggerSafe] Message rendering patches active v${this.getVersion()}`);
     this.forceReloadMessages();
+  }
+  patchChatDom() {
+    if (this._chatDomDecorations) return;
+    const decorations = this._chatDomDecorations = new Map();
+    const events = ['MESSAGE_CREATE', 'MESSAGE_UPDATE', 'LOAD_MESSAGES_SUCCESS', 'CHANNEL_SELECT', 'MLV2_FORCE_UPDATE_MESSAGE', 'MLV2_FORCE_UPDATE_MESSAGE_CONTENT'];
+    const schedule = () => {
+      if (this._stopped || !this.__started || this._chatDomTimeout) return;
+      this._chatDomTimeout = setTimeout(() => {
+        this._chatDomTimeout = null;
+        if (this._stopped || !this.__started) return;
+        try {
+          this.syncChatDom();
+        } catch (error) {
+          Logger.stacktrace(this.getName(), 'Failed to decorate chat messages', error);
+        }
+      }, 0);
+    };
+    for (const event of events) this.dispatcher.subscribe(event, schedule);
+    const subscription = this.subscribeObserver(schedule, () => true);
+    this.unpatches.push(() => {
+      clearTimeout(this._chatDomTimeout);
+      this._chatDomTimeout = null;
+      for (const event of events) this.dispatcher.unsubscribe(event, schedule);
+      this.unsubscribeObserver(subscription);
+      for (const [message, decoration] of decorations) {
+        decoration.root?.unmount();
+        decoration.history?.remove();
+        message.classList.remove(this.style.deleted, this.style.deletedAlt);
+      }
+      decorations.clear();
+      this._chatDomDecorations = null;
+    });
+    console.info(`[MessageLoggerSafe] Native chat decorations active v${this.getVersion()}`);
+    schedule();
+  }
+  syncChatDom() {
+    const decorations = this._chatDomDecorations;
+    if (!decorations) return;
+    for (const [message, decoration] of decorations) {
+      if (message.isConnected && (!decoration.history || decoration.history.isConnected)) continue;
+      decoration.root?.unmount();
+      decoration.history?.remove();
+      decorations.delete(message);
+    }
+    const seenMessages = new Set();
+    for (const message of document.querySelectorAll('[id^="chat-messages-"], [data-list-item-id^="chat-messages___"]')) {
+      const content = message.querySelector('[id^="message-content-"]');
+      const messageId = content?.id.slice('message-content-'.length) || (message.id || message.getAttribute('data-list-item-id')).split(/[-_]/).pop();
+      if (seenMessages.has(messageId)) continue;
+      seenMessages.add(messageId);
+      const record = this.messageRecord[messageId];
+      const previous = decorations.get(message);
+      if (!record && !previous) continue;
+      const purged = this.purgedMessageRecord[record?.message.channel_id]?.includes(messageId);
+      const showDeleted = purged ? this.settings.showPurgedMessages : this.settings.showDeletedMessages;
+      const deleted = !!record?.delete_data && !record.delete_data.hidden && showDeleted !== false && !this.noTintIds.includes(messageId);
+      message.classList.toggle(this.style.deleted, deleted && !this.settings.useAlternativeDeletedStyle);
+      message.classList.toggle(this.style.deletedAlt, deleted && this.settings.useAlternativeDeletedStyle);
+      const decoration = previous || {};
+      decorations.set(message, decoration);
+      const history = record?.edit_history || [];
+      if (!content || !history.length || content.querySelector('[editnum]')) {
+        decoration.root?.unmount();
+        decoration.history?.remove();
+        decoration.root = decoration.history = null;
+        decoration.signature = null;
+        continue;
+      }
+      const modifier = this.editModifiers[messageId];
+      const showHistory = modifier?.showAllEdits || (this.settings.showEditedMessages && !record.edits_hidden);
+      const limit = modifier?.showAllEdits ? 0 : this.settings.maxShownEdits;
+      const visible = !showHistory ? [] : limit ? (this.settings.hideNewerEditsFirst ? history.slice(0, limit) : history.slice(-limit)) : history;
+      const signature = JSON.stringify([messageId, visible, history.length, showHistory, this.settings.hideNewerEditsFirst]);
+      if (!decoration.history) {
+        decoration.history = document.createElement('div');
+        decoration.history.setAttribute('data-mlv2-edit-history', messageId);
+        content.before(decoration.history);
+        decoration.root = BdApi.ReactDOM.createRoot(decoration.history);
+      }
+      if (decoration.signature === signature) continue;
+      decoration.signature = signature;
+      const plugin = this;
+      function EditContent({ text }) {
+        return plugin.tools.parse(text, true, { channelId: record.message.channel_id });
+      }
+      const children = visible.map((edit, index) => React.createElement(
+        'div', { key: index, className: this.style.edited, title: 'Edited: ' + this.createTimeStamp(edit.time) },
+        React.createElement(BdApi.Components.ErrorBoundary, { name: 'Chat edit history' }, React.createElement(EditContent, { text: edit.content }))
+      ));
+      const hiddenCount = history.length - visible.length;
+      if (hiddenCount) children.push(React.createElement('button', {
+        key: 'show-edits', type: 'button', className: this.style.editedTagClicky,
+        style: { background: 'none', border: 0, padding: 0, color: 'var(--text-muted)', fontSize: 'inherit' },
+        title: 'Show all edits', onClick: () => {
+          record.edits_hidden = false;
+          this.editModifiers[messageId] = { showAllEdits: true };
+          this.syncChatDom();
+        }
+      }, `(edited) (${hiddenCount})`));
+      decoration.root.render(React.createElement('div', { className: this.classes.markup }, children));
+    }
   }
   forceReloadMessages() {
     const instance = BdApi.Utils.findInTree(this.getReactInstance(document.querySelector('.chatContent-3KubbW')), e => ((typeof e?.memoizedProps?.showQuarantinedUserBanner) === 'boolean'), { walkable: ['return'] })?.stateNode;
